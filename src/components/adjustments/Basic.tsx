@@ -139,7 +139,7 @@ const ToneMapperSwitch = ({
         </div>
         <div className="mt-2.5 px-1">
           <Slider
-            label={t('adjustments.basic.evShift')}
+            label={t('adjustments.basic.exposure')}
             max={5}
             min={-5}
             onChange={(e: any) => onEvShiftChange(parseFloat(e.target.value))}
@@ -181,11 +181,14 @@ export default function BasicAdjustments({
     <div>
       {hideTonemapper ? (
         <Slider
-          label={t('adjustments.basic.evShift')}
+          label={t('adjustments.basic.exposure')}
           max={5}
           min={-5}
           onChange={(e: any) => handleAdjustmentChange(BasicAdjustment.Exposure, e.target.value)}
-          step={0.01}
+          // A tenth of a stop, which is the smallest step worth having and the
+          // one the Quick Adjustments shortcuts move by.
+          step={0.1}
+          adjustmentKey="exposure"
           value={adjustments.exposure}
           onDragStateChange={onDragStateChange}
         />
@@ -199,7 +202,7 @@ export default function BasicAdjustments({
         />
       )}
       <Slider
-        label={t('adjustments.basic.exposure')}
+        label={t('adjustments.basic.brightness')}
         max={5}
         min={-5}
         onChange={(e: any) => handleAdjustmentChange(BasicAdjustment.Brightness, e.target.value)}

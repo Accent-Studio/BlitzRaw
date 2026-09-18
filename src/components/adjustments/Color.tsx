@@ -4,17 +4,18 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import Slider from '../ui/Slider';
 import ColorWheel from '../ui/ColorWheel';
-import { ColorAdjustment, ColorCalibration, HueSatLum, INITIAL_ADJUSTMENTS } from '../../utils/adjustments';
+import { invoke } from '@tauri-apps/api/core';
+import {
+  ColorAdjustment,
+  ColorCalibration,
+  HueSatLum,
+  INITIAL_ADJUSTMENTS,
+  wholeWhiteBalance,
+} from '../../utils/adjustments';
 import { Adjustments, ColorGrading } from '../../utils/adjustments';
 import { AppSettings } from '../ui/AppProperties';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
-
-interface ColorProps {
-  color: string;
-  name: string;
-  label: string;
-}
 
 interface ColorPanelProps {
   adjustments: Adjustments;
@@ -24,6 +25,35 @@ interface ColorPanelProps {
   isWbPickerActive?: boolean;
   toggleWbPicker?: () => void;
   onDragStateChange?: (isDragging: boolean) => void;
+  /**
+   * BLITZRAW: needed to read the file's own as-shot white balance. `isRaw`
+   * carries the layout until the backend answers, so the panel does not flip
+   * between the two pairs of sliders on every image change.
+   */
+  selectedImage?: { path?: string; isRaw?: boolean } | null;
+}
+
+/**
+ * BLITZRAW: where the Kelvin track starts and ends.
+ *
+ * Not the limits of what is valid, which the backend reports and which reach
+ * far wider. These are the limits of what is useful to drag through: roughly
+ * candlelight to open shade, which covers every event and interior we shoot.
+ */
+const KELVIN_TRACK_MIN = 2000;
+const KELVIN_TRACK_MAX = 7000;
+export const KELVIN_STEP = 50;
+
+/** BLITZRAW: what the backend reports about a file's white balance. */
+interface WhiteBalanceInfo {
+  hasProfile: boolean;
+  asShotKelvin: number;
+  asShotTint: number;
+  minKelvin: number;
+  maxKelvin: number;
+  minTint: number;
+  maxTint: number;
+  hasForwardMatrix: boolean;
 }
 
 interface ColorSwatchProps {
@@ -393,80 +423,139 @@ const ColorCalibrationPanel = ({ adjustments, setAdjustments, onDragStateChange 
   );
 };
 
-export default function ColorPanel({
+// ============ BLITZRAW: colour split into three panels ============
+// One accordion used to hold white balance, presence, a global hue shift, the
+// grading wheels, the mixer and the calibration. Six unrelated jobs behind one
+// heading, and the two reached on every single photo were buried at the top of
+// a list you had to scroll past four others to leave.
+//
+// Split by when they are reached. Correction sits under Basic because it is
+// part of getting the photo right; the mixer and the grading sit below the
+// curve because they are choices made afterwards. The shared helpers above
+// (the swatch, the wheels, the calibration) are untouched and used by whichever
+// panel needs them.
+
+/**
+ * BLITZRAW: the eight bands the mixer divides the spectrum into, and where each
+ * one sits on the wheel.
+ *
+ * The hue is what the coloured slider tracks are built from: each track is a
+ * gradient around that band's own hue, so a saturation slider for reds is red.
+ * Kept beside the names so the two can never drift apart.
+ */
+type MixerBand = 'reds' | 'oranges' | 'yellows' | 'greens' | 'aquas' | 'blues' | 'purples' | 'magentas';
+
+const MIXER_BANDS: Array<{ name: MixerBand; swatch: string; hue: number }> = [
+  { name: 'reds', swatch: '#f87171', hue: 0 },
+  { name: 'oranges', swatch: '#fb923c', hue: 30 },
+  { name: 'yellows', swatch: '#facc15', hue: 60 },
+  { name: 'greens', swatch: '#4ade80', hue: 120 },
+  { name: 'aquas', swatch: '#2dd4bf', hue: 180 },
+  { name: 'blues', swatch: '#60a5fa', hue: 240 },
+  { name: 'purples', swatch: '#a78bfa', hue: 300 },
+  { name: 'magentas', swatch: '#f472b6', hue: 340 },
+];
+
+/**
+ * The three things the mixer can do to a band, and their slider track names.
+ *
+ * `label` is spelt as a union rather than a string so the translation keys
+ * built from it are literal keys that i18next can check, rather than "some
+ * string appended to a prefix", which it cannot.
+ */
+type MixerChannel = 'hue' | 'saturation' | 'luminance';
+
+const MIXER_CHANNELS: Array<{ key: ColorAdjustment; label: MixerChannel; track: string }> = [
+  { key: ColorAdjustment.Hue, label: 'hue', track: 'hue-slider' },
+  { key: ColorAdjustment.Saturation, label: 'saturation', track: 'sat-slider' },
+  { key: ColorAdjustment.Luminance, label: 'luminance', track: 'lum-slider' },
+];
+
+type MixerView = 'hue' | 'saturation' | 'luminance' | 'all';
+
+/**
+ * BLITZRAW: white balance and presence. Everything a photo needs before it is a
+ * photograph rather than a choice made about one.
+ */
+export function ColorCorrectionPanel({
   adjustments,
   setAdjustments,
-  appSettings,
   isForMask = false,
   isWbPickerActive = false,
   toggleWbPicker,
   onDragStateChange,
+  selectedImage,
 }: ColorPanelProps) {
   const { t } = useTranslation();
-  const [activeColor, setActiveColor] = useState('reds');
-  const adjustmentVisibility = appSettings?.adjustmentVisibility || {};
-  const isWgpuEnabled = appSettings?.useWgpuRenderer !== false;
 
-  const HSL_COLORS = useMemo<Array<ColorProps>>(
-    () => [
-      { name: 'reds', color: '#f87171', label: t('adjustments.color.mixerColors.reds') },
-      { name: 'oranges', color: '#fb923c', label: t('adjustments.color.mixerColors.oranges') },
-      { name: 'yellows', color: '#facc15', label: t('adjustments.color.mixerColors.yellows') },
-      { name: 'greens', color: '#4ade80', label: t('adjustments.color.mixerColors.greens') },
-      { name: 'aquas', color: '#2dd4bf', label: t('adjustments.color.mixerColors.aquas') },
-      { name: 'blues', color: '#60a5fa', label: t('adjustments.color.mixerColors.blues') },
-      { name: 'purples', color: '#a78bfa', label: t('adjustments.color.mixerColors.purples') },
-      { name: 'magentas', color: '#f472b6', label: t('adjustments.color.mixerColors.magentas') },
-    ],
-    [t],
-  );
+  // ============== BLITZRAW: real white balance, in Kelvin ==============
+  // The camera profile lives in the file, so the panel has to ask for it. A
+  // mask has no file of its own, and its temperature stays the local tint it
+  // always was, the same way Lightroom's local temperature is an offset rather
+  // than a Kelvin.
+  const imagePath = isForMask ? undefined : selectedImage?.path;
 
-  const colorHueMap = useMemo<Record<string, number>>(
-    () => ({
-      reds: 0,
-      oranges: 30,
-      yellows: 60,
-      greens: 120,
-      aquas: 180,
-      blues: 240,
-      purples: 300,
-      magentas: 340,
-    }),
-    [],
-  );
-
-  const currentHsl = adjustments?.hsl?.[activeColor] || { hue: 0, saturation: 0, luminance: 0 };
-  const baseHue = colorHueMap[activeColor] || 0;
-  const effectiveHue = baseHue + (currentHsl.hue || 0);
+  // Stored with the path it describes. Without that the previous image's
+  // answer stays on screen while the next one is in flight, and a drag in that
+  // window writes one photo's as-shot Kelvin onto another.
+  const [wbState, setWbState] = useState<{ path: string; info: WhiteBalanceInfo } | null>(null);
 
   useEffect(() => {
-    const normalizedHue = ((effectiveHue % 360) + 360) % 360;
-    const effectiveSaturation = (currentHsl.saturation + 100) / 2;
+    if (!imagePath) {
+      setWbState(null);
+      return;
+    }
+    let cancelled = false;
+    invoke<WhiteBalanceInfo>('get_white_balance_info', { path: imagePath })
+      .then((info) => {
+        if (!cancelled) {
+          setWbState({ path: imagePath, info });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWbState(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [imagePath]);
 
-    document.documentElement.style.setProperty(`--hsl-mixer-hue-${activeColor}`, normalizedHue.toString());
-    document.documentElement.style.setProperty(`--hsl-mixer-sat-${activeColor}`, `${effectiveSaturation}%`);
-  }, [effectiveHue, currentHsl.saturation, activeColor]);
+  const wbInfo = wbState && wbState.path === imagePath ? wbState.info : null;
+  const isWbLoading = !!imagePath && !wbInfo;
+
+  // While the answer is in flight, lay out from what the library already knows.
+  // Guessing from isRaw rather than falling back to the legacy sliders is what
+  // stops the panel flipping between the two pairs on every image change. The
+  // fetch then confirms it, and only disagrees for a RAW the decoder cannot
+  // read, which renders from its embedded JPEG and correctly has no Kelvin.
+  const hasCameraProfile = wbInfo ? wbInfo.hasProfile : !!selectedImage?.isRaw;
+
+  // Null means as-shot, so the slider shows what the camera chose until the
+  // moment it is moved.
+  const kelvin = adjustments.whiteBalance?.kelvin ?? wbInfo?.asShotKelvin ?? 5500;
+  const wbTint = adjustments.whiteBalance?.tint ?? wbInfo?.asShotTint ?? 0;
+  const isAsShot = !adjustments.whiteBalance;
+
+  const setWhiteBalance = (next: { kelvin?: number; tint?: number }) =>
+    setAdjustments((prev: Adjustments) => ({
+      ...prev,
+      // BLITZRAW: rounded, because the as-shot value comes out of the solver as
+      // a float and this is where it would otherwise be written into the photo.
+      // See wholeWhiteBalance.
+      whiteBalance: wholeWhiteBalance({
+        kelvin: next.kelvin ?? prev.whiteBalance?.kelvin ?? wbInfo?.asShotKelvin ?? 5500,
+        tint: next.tint ?? prev.whiteBalance?.tint ?? wbInfo?.asShotTint ?? 0,
+      }),
+    }));
+
+  const resetToAsShot = () => setAdjustments((prev: Adjustments) => ({ ...prev, whiteBalance: null }));
+  // ============ BLITZRAW END: real white balance, in Kelvin ============
 
   const handleAdjustmentChange = (key: ColorAdjustment, value: string) => {
     setAdjustments((prev: Partial<Adjustments>) => ({ ...prev, [key]: parseFloat(value) }));
   };
-
-  const handleHslChange = (key: ColorAdjustment, value: string) => {
-    setAdjustments((prev: Partial<Adjustments>) => ({
-      ...prev,
-      hsl: {
-        ...(prev.hsl || {}),
-        [activeColor]: {
-          ...(prev.hsl?.[activeColor] || {}),
-          [key]: parseFloat(value),
-        },
-      },
-    }));
-  };
-
-  const hue_slider = `hue-slider-${activeColor}`;
-  const saturation_slider = `sat-slider-${activeColor}`;
-  const luminance_slider = `lum-slider-${activeColor}`;
 
   return (
     <div className="space-y-4">
@@ -477,9 +566,7 @@ export default function ColorPanel({
             <button
               onClick={toggleWbPicker}
               className={`p-1.5 rounded-md transition-colors ${
-                isWbPickerActive
-                  ? 'bg-accent text-button-text'
-                  : 'hover:bg-bg-secondary text-text-secondary'
+                isWbPickerActive ? 'bg-accent text-button-text' : 'hover:bg-bg-secondary text-text-secondary'
               }`}
               data-tooltip={t('adjustments.color.wbPickerTooltip')}
             >
@@ -487,26 +574,86 @@ export default function ColorPanel({
             </button>
           )}
         </div>
-        <Slider
-          label={t('adjustments.color.temperature')}
-          max={100}
-          min={-100}
-          onChange={(e: any) => handleAdjustmentChange(ColorAdjustment.Temperature, e.target.value)}
-          step={1}
-          value={adjustments.temperature || 0}
-          trackClassName="temperature-gradient-track"
-          onDragStateChange={onDragStateChange}
-        />
-        <Slider
-          label={t('adjustments.color.tint')}
-          max={100}
-          min={-100}
-          onChange={(e: any) => handleAdjustmentChange(ColorAdjustment.Tint, e.target.value)}
-          step={1}
-          value={adjustments.tint || 0}
-          trackClassName="tint-gradient-track"
-          onDragStateChange={onDragStateChange}
-        />
+        {/* ============== BLITZRAW: real white balance, in Kelvin ==============
+            With a camera profile the sliders are the real thing, interpolated
+            between the camera's own calibration illuminants. Without one there
+            is nothing to anchor a Kelvin to, so the old relative tint stays:
+            that is the honest control for a JPEG. */}
+        {hasCameraProfile ? (
+          <>
+            <Slider
+              label={t('adjustments.color.temperature')}
+              // The track covers the range real scenes actually fall in, from
+              // candlelight to open shade. Spanning the whole legal range
+              // instead would squeeze every ordinary photo into the first
+              // tenth of the groove. Typing still reaches the rest.
+              max={KELVIN_TRACK_MAX}
+              min={KELVIN_TRACK_MIN}
+              inputMax={wbInfo?.maxKelvin ?? 50000}
+              inputMin={wbInfo?.minKelvin ?? 1667}
+              onChange={(e: any) => setWhiteBalance({ kelvin: parseFloat(e.target.value) })}
+              // Fifty, as Lightroom does. Ten is finer than anyone can see and
+              // makes dragging to a round number needlessly fiddly.
+              step={KELVIN_STEP}
+              value={kelvin}
+              adjustmentKey="whiteBalance.kelvin"
+              suffix="K"
+              // Until the file's own as-shot white is known there is nothing
+              // to move relative to, and a drag would commit a placeholder.
+              disabled={isWbLoading}
+              // As-shot is the zero of this slider, so it is what a
+              // double-click returns to and where the fill starts.
+              defaultValue={wbInfo?.asShotKelvin ?? 5500}
+              fillOrigin="default"
+              trackClassName="temperature-gradient-track"
+              onDragStateChange={onDragStateChange}
+            />
+            <Slider
+              label={t('adjustments.color.tint')}
+              max={wbInfo?.maxTint ?? 150}
+              min={wbInfo?.minTint ?? -150}
+              onChange={(e: any) => setWhiteBalance({ tint: parseFloat(e.target.value) })}
+              step={1}
+              value={wbTint}
+              disabled={isWbLoading}
+              defaultValue={wbInfo?.asShotTint ?? 0}
+              fillOrigin="default"
+              trackClassName="tint-gradient-track"
+              onDragStateChange={onDragStateChange}
+            />
+            <button
+              onClick={resetToAsShot}
+              disabled={isAsShot || isWbLoading}
+              className="mt-1 w-full text-xs py-1 rounded-md transition-colors disabled:opacity-40 disabled:cursor-default hover:bg-bg-secondary text-text-secondary"
+            >
+              {isAsShot ? t('adjustments.color.wbAsShot') : t('adjustments.color.wbResetAsShot')}
+            </button>
+          </>
+        ) : (
+          <>
+            <Slider
+              label={t('adjustments.color.temperature')}
+              max={100}
+              min={-100}
+              onChange={(e: any) => handleAdjustmentChange(ColorAdjustment.Temperature, e.target.value)}
+              step={1}
+              value={adjustments.temperature || 0}
+              trackClassName="temperature-gradient-track"
+              onDragStateChange={onDragStateChange}
+            />
+            <Slider
+              label={t('adjustments.color.tint')}
+              max={100}
+              min={-100}
+              onChange={(e: any) => handleAdjustmentChange(ColorAdjustment.Tint, e.target.value)}
+              step={1}
+              value={adjustments.tint || 0}
+              trackClassName="tint-gradient-track"
+              onDragStateChange={onDragStateChange}
+            />
+          </>
+        )}
+        {/* ============ BLITZRAW END: real white balance, in Kelvin ============ */}
       </div>
 
       <div className="p-2 bg-bg-tertiary rounded-md">
@@ -532,7 +679,139 @@ export default function ColorPanel({
           onDragStateChange={onDragStateChange}
         />
       </div>
+    </div>
+  );
+}
 
+/**
+ * BLITZRAW: the per-colour mixer, laid out the way Lightroom lays it out.
+ *
+ * It was here before, as a row of swatches and three sliders for whichever one
+ * was picked. That shows one band at a time, and the whole point of a mixer is
+ * comparing bands: pulling the greens down and the aquas up is one decision,
+ * not two, and it cannot be seen through a control that only draws one of them.
+ *
+ * Four views. Three show one channel across all eight bands, which is how you
+ * find a band. **All** shows the whole grid, which is how you judge a set of
+ * moves together, and is what the panel opens on.
+ *
+ * Every track keeps the colour it describes: a saturation slider for reds runs
+ * grey to red, and its hue slider moves with the band as the band is moved. The
+ * CSS reads those from custom properties, and all eight are kept current rather
+ * than only the selected one, because in this layout all eight are on screen.
+ */
+export function ColorMixerPanel({ adjustments, setAdjustments, onDragStateChange }: ColorPanelProps) {
+  const { t } = useTranslation();
+  const [view, setView] = useState<MixerView>('all');
+
+  const hsl = adjustments?.hsl;
+
+  useEffect(() => {
+    for (const band of MIXER_BANDS) {
+      const values = hsl?.[band.name] || { hue: 0, saturation: 0, luminance: 0 };
+      const shifted = ((((band.hue + (values.hue || 0)) % 360) + 360) % 360).toString();
+      // The saturation track has to show the band as it now is, and the stored
+      // number is a shift from -100 to 100 rather than a saturation.
+      const saturation = `${((values.saturation || 0) + 100) / 2}%`;
+
+      document.documentElement.style.setProperty(`--hsl-mixer-hue-${band.name}`, shifted);
+      document.documentElement.style.setProperty(`--hsl-mixer-sat-${band.name}`, saturation);
+    }
+  }, [hsl]);
+
+  const setBand = (band: string, key: ColorAdjustment, value: string) => {
+    setAdjustments((prev: Partial<Adjustments>) => ({
+      ...prev,
+      hsl: {
+        ...(prev.hsl || {}),
+        [band]: {
+          ...(prev.hsl?.[band] || {}),
+          [key]: parseFloat(value),
+        },
+      },
+    }));
+  };
+
+  const channelRows = (channel: (typeof MIXER_CHANNELS)[number]) =>
+    MIXER_BANDS.map((band) => (
+      <Slider
+        key={`${channel.label}-${band.name}`}
+        label={t(`adjustments.color.mixerColors.${band.name}`)}
+        max={100}
+        min={-100}
+        step={1}
+        value={hsl?.[band.name]?.[channel.label] ?? 0}
+        onChange={(e: any) => setBand(band.name, channel.key, e.target.value)}
+        trackClassName={`${channel.track}-${band.name}`}
+        onDragStateChange={onDragStateChange}
+      />
+    ));
+
+  // All first, because it is what the panel opens on and what most work is
+  // done in. The three single-channel views are for narrowing down.
+  const views: Array<{ id: MixerView; label: string }> = [
+    { id: 'all', label: t('adjustments.color.mixerAll') },
+    { id: 'hue', label: t('adjustments.color.hue') },
+    { id: 'saturation', label: t('adjustments.color.saturation') },
+    { id: 'luminance', label: t('adjustments.color.luminance') },
+  ];
+
+  const shown = view === 'all' ? MIXER_CHANNELS : MIXER_CHANNELS.filter((c) => c.label === view);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1 p-1 bg-bg-tertiary rounded-md">
+        {views.map(({ id, label }) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className={`flex-1 text-xs py-1 rounded transition-colors ${
+              view === id ? 'bg-surface text-text-primary' : 'text-text-secondary hover:bg-bg-secondary'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {shown.map((channel) => (
+        <div className="p-2 bg-bg-tertiary rounded-md" key={channel.label}>
+          {/* Only when more than one is showing. A single channel already says
+              which it is in the row of buttons above, and repeating it wastes
+              a line of a panel that is eight sliders tall. */}
+          {view === 'all' && (
+            <Text variant={TextVariants.heading} className="mb-2">
+              {t(`adjustments.color.${channel.label}`)}
+            </Text>
+          )}
+          {channelRows(channel)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * BLITZRAW: what is left once correction and the mixer have their own panels,
+ * and what the heading now honestly describes. A global hue shift, the grading
+ * wheels, and the camera calibration.
+ */
+export default function ColorPanel({
+  adjustments,
+  setAdjustments,
+  appSettings,
+  isForMask = false,
+  onDragStateChange,
+}: ColorPanelProps) {
+  const { t } = useTranslation();
+  const adjustmentVisibility = appSettings?.adjustmentVisibility || {};
+
+  const handleAdjustmentChange = (key: ColorAdjustment, value: string) => {
+    setAdjustments((prev: Partial<Adjustments>) => ({ ...prev, [key]: parseFloat(value) }));
+  };
+
+  return (
+    <div className="space-y-4">
       <div className="p-2 bg-bg-tertiary rounded-md">
         <Text variant={TextVariants.heading} className="mb-2">
           {isForMask ? t('adjustments.color.localHue') : t('adjustments.color.hue')}
@@ -561,54 +840,6 @@ export default function ColorPanel({
         />
       </div>
 
-      <div className="p-2 bg-bg-tertiary rounded-md">
-        <Text variant={TextVariants.heading} className="mb-3">
-          {t('adjustments.color.colorMixer')}
-        </Text>
-        <div className="flex justify-between mb-4 px-1">
-          {HSL_COLORS.map(({ name, color, label }) => (
-            <ColorSwatch
-              color={color}
-              isActive={activeColor === name}
-              key={name}
-              name={name}
-              onClick={setActiveColor}
-              ariaLabel={t('adjustments.color.ariaSelectColor', { name: label })}
-            />
-          ))}
-        </div>
-        <Slider
-          label={t('adjustments.color.hue')}
-          max={100}
-          min={-100}
-          onChange={(e: any) => handleHslChange(ColorAdjustment.Hue, e.target.value)}
-          step={1}
-          value={currentHsl.hue}
-          trackClassName={hue_slider}
-          onDragStateChange={onDragStateChange}
-        />
-        <Slider
-          label={t('adjustments.color.saturation')}
-          max={100}
-          min={-100}
-          onChange={(e: any) => handleHslChange(ColorAdjustment.Saturation, e.target.value)}
-          step={1}
-          value={currentHsl.saturation}
-          trackClassName={saturation_slider}
-          onDragStateChange={onDragStateChange}
-        />
-        <Slider
-          label={t('adjustments.color.luminance')}
-          max={100}
-          min={-100}
-          onChange={(e: any) => handleHslChange(ColorAdjustment.Luminance, e.target.value)}
-          step={1}
-          value={currentHsl.luminance}
-          trackClassName={luminance_slider}
-          onDragStateChange={onDragStateChange}
-        />
-      </div>
-
       {!isForMask && adjustmentVisibility.colorCalibration !== false && (
         <ColorCalibrationPanel
           adjustments={adjustments}
@@ -620,3 +851,4 @@ export default function ColorPanel({
     </div>
   );
 }
+// ========== BLITZRAW END: colour split into three panels ==========

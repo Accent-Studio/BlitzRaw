@@ -1988,3 +1988,90 @@ fn process_and_get_dynamic_image_inner(
         .ok_or("Failed to create image buffer from GPU data")?;
     Ok(DynamicImage::ImageRgba8(img_buf))
 }
+
+// ================== BLITZRAW: camera-calibrated white balance ==================
+#[cfg(test)]
+mod blitzraw_shader_tests {
+    use crate::image_processing::AllAdjustments;
+
+    /// Compiles the real shader and checks the uniform it declares is exactly
+    /// the size of the Rust struct we fill in.
+    ///
+    /// The two structs are written out by hand in two languages, and nothing
+    /// but agreement keeps them working. A field added on one side only does
+    /// not fail to build; it shifts every following offset and the image comes
+    /// out with the channels quietly wrong. wgpu knows the answer, so ask it.
+    ///
+    /// Skips when no GPU adapter is available rather than failing, since that
+    /// says nothing about the code.
+    #[test]
+    fn the_shader_agrees_with_the_rust_uniform() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })) else {
+            eprintln!("no GPU adapter available, skipping");
+            return;
+        };
+
+        let Ok((device, _queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("blitzraw shader check"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+        else {
+            eprintln!("could not open a GPU device, skipping");
+            return;
+        };
+
+        // Any WGSL error, including a malformed struct, surfaces here.
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = errors.clone();
+        device.on_uncaptured_error(std::sync::Arc::new(move |error: wgpu::Error| {
+            sink.lock().unwrap().push(error.to_string());
+        }));
+
+        let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shader.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
+        });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_millis(500)),
+        });
+
+        let reported = errors.lock().unwrap().clone();
+        assert!(
+            reported.is_empty(),
+            "shader.wgsl failed to compile:\n{}",
+            reported.join("\n")
+        );
+
+        // A uniform buffer the size of the Rust struct has to be a legal size
+        // for the binding, which it is not if the WGSL struct grew past it.
+        let size = std::mem::size_of::<AllAdjustments>() as u64;
+        let _buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("adjustments"),
+            size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_millis(500)),
+        });
+
+        let reported = errors.lock().unwrap().clone();
+        assert!(
+            reported.is_empty(),
+            "a {size}-byte uniform buffer was rejected:\n{}",
+            reported.join("\n")
+        );
+        eprintln!("shader.wgsl compiled; AllAdjustments is {size} bytes");
+    }
+}
+// ================ BLITZRAW END: camera-calibrated white balance ================

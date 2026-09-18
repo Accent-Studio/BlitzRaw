@@ -50,6 +50,20 @@ export enum ColorAdjustment {
   Vibrance = 'vibrance',
 }
 
+/**
+ * BLITZRAW: an actual white balance, in Kelvin and tint, rather than the linear
+ * RGB tint the `temperature` field holds.
+ *
+ * Null means as-shot. It has to be nullable rather than defaulting to a number,
+ * because there is no sensible default: as-shot is a property of the file, not
+ * of the adjustment, and 5500 would silently re-white-balance every photo that
+ * had never been touched.
+ */
+export interface WhiteBalance {
+  kelvin: number;
+  tint: number;
+}
+
 export enum ColorGrading {
   Balance = 'balance',
   Blending = 'blending',
@@ -236,6 +250,8 @@ export interface Adjustments {
   temperature: number;
   tint: number;
   toneMapper: 'agx' | 'basic';
+  /** BLITZRAW: null means the white the camera chose. */
+  whiteBalance: WhiteBalance | null;
   transformDistortion: number;
   transformVertical: number;
   transformHorizontal: number;
@@ -356,16 +372,40 @@ export interface MaskContainer {
 export interface Sections {
   [index: string]: Array<string>;
   basic: Array<string>;
+  colorCorrection: Array<string>;
   curves: Array<string>;
+  colorMixer: Array<string>;
   color: Array<string>;
   details: Array<string>;
   effects: Array<string>;
 }
 
+/**
+ * BLITZRAW: the translation key for each accordion heading.
+ *
+ * Spelt out rather than built by appending the section name to a prefix, so
+ * i18next sees literal keys it can check. The mask panel used to capitalise the
+ * key instead, which was fine while every section was one word and produced
+ * "ColorCorrection" the moment one was not.
+ */
+export const SECTION_TITLE_KEYS = {
+  basic: 'editor.adjustments.sections.basic',
+  colorCorrection: 'editor.adjustments.sections.colorCorrection',
+  curves: 'editor.adjustments.sections.curves',
+  colorMixer: 'editor.adjustments.sections.colorMixer',
+  color: 'editor.adjustments.sections.color',
+  details: 'editor.adjustments.sections.details',
+  effects: 'editor.adjustments.sections.effects',
+} as const;
+
 export interface SectionVisibility {
   [index: string]: boolean;
   basic: boolean;
+  /** BLITZRAW: white balance and presence. See ADJUSTMENT_SECTIONS. */
+  colorCorrection: boolean;
   curves: boolean;
+  /** BLITZRAW: the per-colour hue, saturation and luminance mixer. */
+  colorMixer: boolean;
   color: boolean;
   details: boolean;
   effects: boolean;
@@ -470,7 +510,9 @@ export const INITIAL_MASK_ADJUSTMENTS: MaskAdjustments = {
   saturation: 0,
   sectionVisibility: {
     basic: true,
+    colorCorrection: true,
     curves: true,
+    colorMixer: true,
     color: true,
     details: true,
     effects: true,
@@ -565,7 +607,9 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   saturation: 0,
   sectionVisibility: {
     basic: true,
+    colorCorrection: true,
     curves: true,
+    colorMixer: true,
     color: true,
     details: true,
     effects: true,
@@ -578,6 +622,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   temperature: 0,
   tint: 0,
   toneMapper: 'basic',
+  whiteBalance: null,
   transformDistortion: 0,
   transformVertical: 0,
   transformHorizontal: 0,
@@ -619,6 +664,35 @@ const deepCloneParametric = (pCurve: any): ParametricCurve => ({
   green: { ...DEFAULT_PARAMETRIC_CURVE_SETTINGS, ...(pCurve?.green || {}) },
   blue: { ...DEFAULT_PARAMETRIC_CURVE_SETTINGS, ...(pCurve?.blue || {}) },
 });
+
+// ============ BLITZRAW: a white balance is a whole number ============
+/**
+ * Kelvin and tint, rounded.
+ *
+ * The temperature slider steps by fifty and the tint slider by one, so nothing
+ * below a whole number is reachable by hand or visible on screen. The as-shot
+ * value is not reachable by hand: it comes out of the camera profile solver as
+ * a float, and the moment anything touched white balance that float was written
+ * into the photo. Clicking into the field then showed 4700.46544984897489489
+ * where the slider had been reading 4700.
+ *
+ * It cost more than looking silly. A number written with a decimal point and the
+ * same number written without one are the same number, but they are not the same
+ * JSON, and a round trip through the front end flips between the two. Every save
+ * then recorded a white balance change that had not happened. Rounding is the
+ * cheap half of stopping that; comparing by value rather than by spelling, in
+ * `edit_history.rs` and `historyNames.ts`, is the half that had to be right
+ * anyway.
+ *
+ * Null is left alone: it means as-shot, which is not a number yet.
+ */
+export const wholeWhiteBalance = (wb: { kelvin?: number; tint?: number } | null | undefined) => {
+  if (!wb) return wb ?? null;
+  const whole = (value: unknown, fallback: number) =>
+    typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback;
+  return { ...wb, kelvin: whole(wb.kelvin, 5500), tint: whole(wb.tint, 0) };
+};
+// ========== BLITZRAW END: a white balance is a whole number ==========
 
 export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any => {
   if (!loadedAdjustments) {
@@ -679,6 +753,8 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
   return {
     ...INITIAL_ADJUSTMENTS,
     ...loadedAdjustments,
+    // BLITZRAW: whole numbers. See wholeWhiteBalance.
+    whiteBalance: wholeWhiteBalance(loadedAdjustments.whiteBalance),
     flareAmount: loadedAdjustments.flareAmount ?? INITIAL_ADJUSTMENTS.flareAmount,
     glowAmount: loadedAdjustments.glowAmount ?? INITIAL_ADJUSTMENTS.glowAmount,
     halationAmount: loadedAdjustments.halationAmount ?? INITIAL_ADJUSTMENTS.halationAmount,
@@ -756,7 +832,12 @@ export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
     },
   ],
   color: [
-    { label: 'modals.copyPaste.groups.whiteBalance', keys: [ColorAdjustment.Temperature, ColorAdjustment.Tint] },
+    {
+      label: 'modals.copyPaste.groups.whiteBalance',
+      // BLITZRAW: whiteBalance carries the real Kelvin; temperature and tint
+      // stay in the group so copying still works on files with no calibration.
+      keys: ['whiteBalance', ColorAdjustment.Temperature, ColorAdjustment.Tint],
+    },
     { label: 'modals.copyPaste.groups.presence', keys: [ColorAdjustment.Saturation, ColorAdjustment.Vibrance] },
     {
       label: 'modals.copyPaste.groups.hueShift',
@@ -856,17 +937,28 @@ export const ADJUSTMENT_SECTIONS: Sections = {
     BasicAdjustment.Exposure,
     'toneMapper',
   ],
-  curves: ['curves', 'pointCurves', 'parametricCurve', 'curveMode'],
-  color: [
-    ColorAdjustment.Saturation,
+  // ============ BLITZRAW: colour split into three sections ============
+  // One "Color" accordion held white balance, presence, a global hue shift,
+  // the grading wheels, the mixer and the calibration: six unrelated jobs
+  // behind one heading, and the two used on every photo were at the top of a
+  // list you had to scroll. Split by when they are reached instead.
+  //
+  // The order of these keys is the order the accordions are drawn, in the
+  // editor and in the mask panel alike.
+  /** What every photo needs, in the order it is done. Sits under Basic. */
+  colorCorrection: [
+    'whiteBalance', // BLITZRAW
     ColorAdjustment.Temperature,
     ColorAdjustment.Tint,
     ColorAdjustment.Vibrance,
-    ColorAdjustment.Hsl,
-    ColorAdjustment.ColorGrading,
-    'colorCalibration',
-    ColorAdjustment.Hue,
+    ColorAdjustment.Saturation,
   ],
+  curves: ['curves', 'pointCurves', 'parametricCurve', 'curveMode'],
+  /** One colour at a time. Its own section, as it is in Lightroom. */
+  colorMixer: [ColorAdjustment.Hsl],
+  /** What is left, and what the heading now honestly describes. */
+  color: [ColorAdjustment.ColorGrading, 'colorCalibration', ColorAdjustment.Hue],
+  // ========== BLITZRAW END: colour split into three sections ==========
   details: [
     DetailsAdjustment.Clarity,
     DetailsAdjustment.Dehaze,

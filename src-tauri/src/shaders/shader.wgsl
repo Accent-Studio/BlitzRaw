@@ -115,6 +115,16 @@ struct GlobalAdjustments {
     halation_amount: f32,
     flare_amount: f32,
     sharpness_threshold: f32,
+
+    // ================== BLITZRAW: camera-calibrated white balance ==================
+    // Mirrors GlobalAdjustments in image_processing.rs. Field order and padding
+    // must match it exactly or every value past this point is read wrong.
+    camera_to_working: mat3x3<f32>,
+    use_camera_profile: u32,
+    _pad_wb1: f32,
+    _pad_wb2: f32,
+    _pad_wb3: f32,
+    // ================ BLITZRAW END: camera-calibrated white balance ================
 }
 
 struct MaskAdjustments {
@@ -585,6 +595,22 @@ fn apply_color_calibration(color: vec3<f32>, cal: ColorCalibrationSettings) -> v
 
     return c;
 }
+
+// ================== BLITZRAW: camera-calibrated white balance ==================
+// Carries the as-shot render to the white balance the user asked for. A plain
+// 3x3, because both renders are linear maps of the same sensor data, so this
+// is exact rather than an approximation of one.
+//
+// Everything read out of the input texture goes through here, including the
+// pre-blurred copies, or the pixel and its own neighbourhood would end up in
+// different colour spaces and every local-contrast effect would fight itself.
+fn apply_camera_profile(color: vec3<f32>) -> vec3<f32> {
+    if (adjustments.global.use_camera_profile == 0u) {
+        return color;
+    }
+    return adjustments.global.camera_to_working * color;
+}
+// ================ BLITZRAW END: camera-calibrated white balance ================
 
 fn apply_white_balance(color: vec3<f32>, temp: f32, tnt: f32) -> vec3<f32> {
     var rgb = color;
@@ -1638,6 +1664,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var t_saturation = adjustments.global.saturation;
     var t_temperature = adjustments.global.temperature;
     var t_tint = adjustments.global.tint;
+    // BLITZRAW: what the masks alone asked for, kept apart from the global.
+    //
+    // On a file with a camera profile the global white balance is done earlier,
+    // in Kelvin, from the camera's own calibration, and the old relative pair
+    // above must not be applied a second time. Gating the whole call on that
+    // took the masks with it, because a mask's temperature had no code of its
+    // own: it rode on the same call. A mask offset is still wanted on those
+    // files, so it is carried separately and applied on its own. See below.
+    var mask_temperature = 0.0;
+    var mask_tint = 0.0;
     var t_vibrance = adjustments.global.vibrance;
     var t_luma_nr = adjustments.global.luma_noise_reduction;
     var t_color_nr = adjustments.global.color_noise_reduction;
@@ -1676,6 +1712,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             t_saturation += m.saturation * influence;
             t_temperature += m.temperature * influence;
             t_tint += m.tint * influence;
+            mask_temperature += m.temperature * influence;
+            mask_tint += m.tint * influence;
             t_vibrance += m.vibrance * influence;
 
             t_luma_nr += m.luma_noise_reduction * influence;
@@ -1713,10 +1751,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         t_luma_nr, t_color_nr, scale, is_raw
     );
 
-    let sharpness_blurred = textureLoad(sharpness_blur_texture, id.xy, 0).rgb;
-    let tonal_blurred = textureLoad(tonal_blur_texture, id.xy, 0).rgb;
-    let clarity_blurred = textureLoad(clarity_blur_texture, id.xy, 0).rgb;
-    let structure_blurred = textureLoad(structure_blur_texture, id.xy, 0).rgb;
+    // BLITZRAW: white balance goes here, before every tonal and local-contrast
+    // step, which is where a raw developer puts it and not where the old
+    // temperature tint sat. It follows noise reduction rather than leading it
+    // only because that samples the input texture directly for neighbours,
+    // which are still in as-shot space; denoising is self-consistent either
+    // way, so it runs first and its result is carried across.
+    initial_linear_rgb = apply_camera_profile(initial_linear_rgb);
+
+    // BLITZRAW: the blur passes ran on the as-shot texture, so bring their
+    // results across too. Same matrix, so this is identical to having blurred
+    // an already-corrected image.
+    let sharpness_blurred = apply_camera_profile(textureLoad(sharpness_blur_texture, id.xy, 0).rgb);
+    let tonal_blurred = apply_camera_profile(textureLoad(tonal_blur_texture, id.xy, 0).rgb);
+    let clarity_blurred = apply_camera_profile(textureLoad(clarity_blur_texture, id.xy, 0).rgb);
+    let structure_blurred = apply_camera_profile(textureLoad(structure_blur_texture, id.xy, 0).rgb);
 
     var locally_contrasted_rgb = initial_linear_rgb;
 
@@ -1761,7 +1810,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     var composite_rgb_linear = apply_dehaze(processed_rgb, structure_blurred, is_raw, t_dehaze);
-    composite_rgb_linear = apply_white_balance(composite_rgb_linear, t_temperature, t_tint);
+    // BLITZRAW: the old linear tint only runs when no camera profile does. It
+    // stays for files that have no calibration to work from, such as JPEGs.
+    if (adjustments.global.use_camera_profile == 0u) {
+        composite_rgb_linear = apply_white_balance(composite_rgb_linear, t_temperature, t_tint);
+    } else if (mask_temperature != 0.0 || mask_tint != 0.0) {
+        // A profiled file has had its white balance set already, in Kelvin,
+        // before this shader ran. A mask's temperature is a local offset from
+        // that, so it still belongs here and here only. Without this line the
+        // mask temperature and tint sliders moved nothing at all on every raw
+        // and on every HDR merge, which is every file that has a calibration to
+        // read: the accumulated value was reached, added up, and then thrown
+        // away unread.
+        composite_rgb_linear = apply_white_balance(composite_rgb_linear, mask_temperature, mask_tint);
+    }
     composite_rgb_linear = apply_centre_tonal_and_color(composite_rgb_linear, adjustments.global.centre, absolute_coord_i);
     composite_rgb_linear = apply_filmic_exposure(composite_rgb_linear, t_brightness);
     composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, is_raw, t_contrast, t_shadows, t_whites, t_blacks);

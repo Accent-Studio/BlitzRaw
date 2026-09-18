@@ -57,6 +57,41 @@ pub struct ImageMetadata {
     pub tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exif: Option<std::collections::HashMap<String, String>>,
+    /// BLITZRAW: the camera calibration a derived file inherited from the RAW
+    /// it was made from. Only merge outputs carry this; a RAW reads its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_profile: Option<crate::camera_profile::StoredProfile>,
+    /// BLITZRAW: everything that has been done to this photo, oldest first.
+    ///
+    /// Written by whoever writes `adjustments`, in the same write, because two
+    /// writers for one value is the fault this project has already paid for
+    /// once. Absent on a photo nothing has been done to since histories
+    /// existed, and safe to delete by hand: it describes how the adjustments
+    /// got where they are and has no say in how the photo looks.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::edit_history::lenient"
+    )]
+    pub history: Option<crate::edit_history::EditHistory>,
+    /// BLITZRAW: what this photo's thumbnail is called in the cache.
+    ///
+    /// Written once, the first time a thumbnail is made, and never again. It
+    /// lives here rather than being worked out from the path so that moving a
+    /// shoot to another drive, or renaming a file, does not orphan its
+    /// thumbnail and make the cache grow by a whole library. The sidecar
+    /// travels with the photo, so the name travels with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_id: Option<String>,
+    /// BLITZRAW: the rating the camera itself wrote into the photo, and the
+    /// proof that we have already looked for one.
+    ///
+    /// `None` means this file has never been asked. The answer is recorded even
+    /// when it is zero, because otherwise a star cleared in BlitzRaw would be
+    /// handed straight back by the camera on the next scan. See
+    /// `embedded_xmp.rs` for where the number comes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_rating: Option<u8>,
 }
 
 impl Default for ImageMetadata {
@@ -67,6 +102,10 @@ impl Default for ImageMetadata {
             adjustments: Value::Null,
             tags: None,
             exif: None,
+            camera_profile: None,
+            history: None,
+            thumbnail_id: None,
+            camera_rating: None,
         }
     }
 }
@@ -448,10 +487,30 @@ fn build_transform_matrices(
     let m_offset = NaMatrix3::new(1.0, 0.0, off_x, 0.0, 1.0, off_y, 0.0, 0.0, 1.0);
 
     let forward = t_center * m_offset * m_perspective * m_rotate * m_scale * t_uncenter;
-    let half_diagonal =
-        ((width as f64 * width as f64 + height as f64 * height as f64).sqrt()) / 2.0;
+    // ============ BLITZRAW: the length a lens profile measures against ============
+    // Half the SHORT SIDE, not half the diagonal.
+    //
+    // Every profile in the database is a polynomial in a radius that has been
+    // divided by something, and it only means anything if we divide by the same
+    // something. This divided by half the diagonal, which put the polynomial's
+    // fixed point exactly at the corner, so every lens came out with its
+    // strongest correction in the middle of the frame and **none at all at the
+    // corners**. That is the wavy moustache, and it is not what any real lens
+    // does: a 14mm ultra-wide has its worst barrel at the corners.
+    //
+    // Measured rather than argued. The same frame was exported from here and
+    // from Lightroom and the two compared along eight rays out from the centre:
+    // ours sat 6 to 7 px further out in the middle of the frame and 5 px
+    // further in near the edges, crossing over at 1051 px in a frame whose half
+    // short side is 1000 px. Dividing by half the short side predicts all six of
+    // those numbers, sign change included, to about a pixel.
+    //
+    // Only the lens profile uses this. The manual Distortion slider has its own
+    // radius and is deliberately left alone.
+    let lens_unit = (width.min(height) as f64) / 2.0;
+    // ========== BLITZRAW END: the length a lens profile measures against ==========
 
-    (forward, cx, cy, half_diagonal)
+    (forward, cx, cy, lens_unit)
 }
 
 struct TcaContext<'a> {
@@ -557,13 +616,47 @@ fn solve_generic_distortion_inv(r_target: f64, k_scaled: f64) -> f64 {
 fn compute_lens_auto_crop_scale(params: &GeometryParams, width: f32, height: f32) -> f64 {
     let cx = (width / 2.0) as f64;
     let cy = (height / 2.0) as f64;
-    let half_diagonal = (cx * cx + cy * cy).sqrt();
+    // ============ BLITZRAW: the length a lens profile measures against ============
+    // Half the SHORT SIDE, not half the diagonal.
+    //
+    // Every profile in the database is a polynomial in a radius that has been
+    // divided by something, and it only means anything if we divide by the same
+    // something. This divided by half the diagonal, which put the polynomial's
+    // fixed point exactly at the corner, so every lens came out with its
+    // strongest correction in the middle of the frame and **none at all at the
+    // corners**. That is the wavy moustache, and it is not what any real lens
+    // does: a 14mm ultra-wide has its worst barrel at the corners.
+    //
+    // Measured rather than argued. The same frame was exported from here and
+    // from Lightroom and the two compared along eight rays out from the centre:
+    // ours sat 6 to 7 px further out in the middle of the frame and 5 px
+    // further in near the edges, crossing over at 1051 px in a frame whose half
+    // short side is 1000 px. Dividing by half the short side predicts all six of
+    // those numbers, sign change included, to about a pixel.
+    //
+    // Only the lens profile uses this. The manual Distortion slider has its own
+    // radius and is deliberately left alone.
+    let lens_unit = cx.min(cy);
+    // ========== BLITZRAW END: the length a lens profile measures against ==========
     let max_radius_sq_inv = 1.0 / (cx * cx + cy * cy);
 
     let lk1 = params.lens_dist_k1 as f64;
     let lk2 = params.lens_dist_k2 as f64;
     let lk3 = params.lens_dist_k3 as f64;
-    let lens_dist_amt = (params.lens_distortion_amount as f64) * 2.5;
+    // ============ BLITZRAW: 100% means the profile, not two and a half of it ============
+    // This was `* 2.5`. A lens profile is a measurement: at 100% the correction
+    // is supposed to be exactly what was measured, and there is no number to
+    // multiply it by. The gain looks copied from the manual Distortion slider a
+    // few lines down, where a 2.5 gain on a -100..100 control is reasonable.
+    //
+    // What it looked like: every profile was applied at 250%. The corner did not
+    // move, because every model in this database is normalised so that the
+    // corner maps to itself, but everything between the centre and the corner
+    // was pushed two and a half times too far. So straight lines near the edge
+    // bowed the wrong way and the picture read as over-corrected rather than
+    // corrected. Upstream code, not ours.
+    let lens_dist_amt = params.lens_distortion_amount as f64;
+    // ========== BLITZRAW END: 100% means the profile, not two and a half of it ==========
 
     let k_distortion = (params.distortion as f64 / 100.0) * 2.5;
 
@@ -596,7 +689,7 @@ fn compute_lens_auto_crop_scale(params: &GeometryParams, width: f32, height: f32
         let mut mapped_dy = dy;
 
         if has_lens_correction {
-            let ru_norm = ru / half_diagonal;
+            let ru_norm = ru / lens_unit;
             let ru_norm2 = ru_norm * ru_norm;
 
             let rd_norm = if is_ptlens {
@@ -647,7 +740,7 @@ pub fn warp_image_geometry(image: &DynamicImage, params: GeometryParams) -> Dyna
     let (width, height) = src_img.dimensions();
     let mut out_buffer = vec![0.0f32; (width * height * 3) as usize];
 
-    let (forward_transform, cx, cy, half_diagonal) =
+    let (forward_transform, cx, cy, lens_unit) =
         build_transform_matrices(&params, width as f32, height as f32);
     let inv = forward_transform
         .try_inverse()
@@ -658,13 +751,26 @@ pub fn warp_image_geometry(image: &DynamicImage, params: GeometryParams) -> Dyna
     let origin_vec = NaVector3::new(inv[(0, 2)], inv[(1, 2)], inv[(2, 2)]);
 
     let max_radius_sq_inv = 1.0 / ((cx * cx + cy * cy) as f64);
-    let hd = half_diagonal;
+    let hd = lens_unit;
 
     let k_distortion = (params.distortion as f64 / 100.0) * 2.5;
     let lk1 = params.lens_dist_k1 as f64;
     let lk2 = params.lens_dist_k2 as f64;
     let lk3 = params.lens_dist_k3 as f64;
-    let lens_dist_amt = (params.lens_distortion_amount as f64) * 2.5;
+    // ============ BLITZRAW: 100% means the profile, not two and a half of it ============
+    // This was `* 2.5`. A lens profile is a measurement: at 100% the correction
+    // is supposed to be exactly what was measured, and there is no number to
+    // multiply it by. The gain looks copied from the manual Distortion slider a
+    // few lines down, where a 2.5 gain on a -100..100 control is reasonable.
+    //
+    // What it looked like: every profile was applied at 250%. The corner did not
+    // move, because every model in this database is normalised so that the
+    // corner maps to itself, but everything between the centre and the corner
+    // was pushed two and a half times too far. So straight lines near the edge
+    // bowed the wrong way and the picture read as over-corrected rather than
+    // corrected. Upstream code, not ours.
+    let lens_dist_amt = params.lens_distortion_amount as f64;
+    // ========== BLITZRAW END: 100% means the profile, not two and a half of it ==========
 
     let has_lens_correction = params.lens_distortion_enabled
         && (lk1.abs() > 1e-6 || lk2.abs() > 1e-6 || lk3.abs() > 1e-6);
@@ -773,10 +879,17 @@ pub fn warp_image_geometry(image: &DynamicImage, params: GeometryParams) -> Dyna
                     }
 
                     if has_vignetting {
+                        // ====== BLITZRAW: vignetting measures against the diagonal ======
+                        // Not the short side, which is what the distortion
+                        // profile uses. Changing both together made the falloff
+                        // plainly wrong, so the two are not the same length and
+                        // this one stays as it was. Only distortion moved.
+                        let vignette_unit = (cx * cx + cy * cy).sqrt() as f64;
+                        // ==== BLITZRAW END: vignetting measures against the diagonal ====
                         let dx = (src_x - cx) as f64;
                         let dy = (src_y - cy) as f64;
                         let ru = (dx * dx + dy * dy).sqrt();
-                        let ru_norm = ru / hd;
+                        let ru_norm = ru / vignette_unit;
                         let ru_norm2 = ru_norm * ru_norm;
 
                         let v_factor = 1.0
@@ -807,16 +920,29 @@ pub fn unwarp_image_geometry(warped_image: &DynamicImage, params: GeometryParams
     let (width, height) = src_img.dimensions();
     let mut out_buffer = vec![0.0f32; (width * height * 3) as usize];
 
-    let (forward_transform, cx, cy, half_diagonal) =
+    let (forward_transform, cx, cy, lens_unit) =
         build_transform_matrices(&params, width as f32, height as f32);
     let max_radius_sq_inv = 1.0 / ((cx * cx + cy * cy) as f64);
-    let hd = half_diagonal;
+    let hd = lens_unit;
 
     let k_distortion = (params.distortion as f64 / 100.0) * 2.5;
     let lk1 = params.lens_dist_k1 as f64;
     let lk2 = params.lens_dist_k2 as f64;
     let lk3 = params.lens_dist_k3 as f64;
-    let lens_dist_amt = (params.lens_distortion_amount as f64) * 2.5;
+    // ============ BLITZRAW: 100% means the profile, not two and a half of it ============
+    // This was `* 2.5`. A lens profile is a measurement: at 100% the correction
+    // is supposed to be exactly what was measured, and there is no number to
+    // multiply it by. The gain looks copied from the manual Distortion slider a
+    // few lines down, where a 2.5 gain on a -100..100 control is reasonable.
+    //
+    // What it looked like: every profile was applied at 250%. The corner did not
+    // move, because every model in this database is normalised so that the
+    // corner maps to itself, but everything between the centre and the corner
+    // was pushed two and a half times too far. So straight lines near the edge
+    // bowed the wrong way and the picture read as over-corrected rather than
+    // corrected. Upstream code, not ours.
+    let lens_dist_amt = params.lens_distortion_amount as f64;
+    // ========== BLITZRAW END: 100% means the profile, not two and a half of it ==========
 
     let has_lens_correction = params.lens_distortion_enabled
         && (lk1.abs() > 1e-6 || lk2.abs() > 1e-6 || lk3.abs() > 1e-6);
@@ -1048,7 +1174,20 @@ pub fn inverse_transform_point(
         let lk1 = params.lens_dist_k1 as f64;
         let lk2 = params.lens_dist_k2 as f64;
         let lk3 = params.lens_dist_k3 as f64;
-        let lens_dist_amt = (params.lens_distortion_amount as f64) * 2.5;
+        // ============ BLITZRAW: 100% means the profile, not two and a half of it ============
+    // This was `* 2.5`. A lens profile is a measurement: at 100% the correction
+    // is supposed to be exactly what was measured, and there is no number to
+    // multiply it by. The gain looks copied from the manual Distortion slider a
+    // few lines down, where a 2.5 gain on a -100..100 control is reasonable.
+    //
+    // What it looked like: every profile was applied at 250%. The corner did not
+    // move, because every model in this database is normalised so that the
+    // corner maps to itself, but everything between the centre and the corner
+    // was pushed two and a half times too far. So straight lines near the edge
+    // bowed the wrong way and the picture read as over-corrected rather than
+    // corrected. Upstream code, not ours.
+    let lens_dist_amt = params.lens_distortion_amount as f64;
+    // ========== BLITZRAW END: 100% means the profile, not two and a half of it ==========
 
         let has_lens_correction = params.lens_distortion_enabled
             && (lk1.abs() > 1e-6 || lk2.abs() > 1e-6 || lk3.abs() > 1e-6);
@@ -1505,6 +1644,22 @@ pub struct GlobalAdjustments {
     pub halation_amount: f32,
     pub flare_amount: f32,
     pub sharpness_threshold: f32,
+
+    // ================== BLITZRAW: camera-calibrated white balance ==================
+    // Camera RGB is converted to linear sRGB at the as-shot white during decode.
+    // This matrix carries that render to whatever white the user has asked for,
+    // and it is exact: both are linear maps of the same sensor data, so the
+    // slider never needs the file decoded again. Identity when unused.
+    //
+    // Appended rather than slotted in, so the offsets upstream already relies
+    // on do not move. mat3x3 wants 16-byte alignment, which the struct happens
+    // to sit on here; `uniform_layout_matches_the_shader` holds that true.
+    pub camera_to_working: GpuMat3,
+    pub use_camera_profile: u32,
+    _pad_wb1: f32,
+    _pad_wb2: f32,
+    _pad_wb3: f32,
+    // ================ BLITZRAW END: camera-calibrated white balance ================
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
@@ -1624,7 +1779,11 @@ struct AdjustmentScales {
 }
 
 const SCALES: AdjustmentScales = AdjustmentScales {
-    exposure: 0.8,
+    // 1.0 so the slider reads in real stops: the shader applies pow(2, value),
+    // making +1 twice the light and -1 half. Any other value here silently
+    // makes the number mean something else; it was 0.8, which divides in, so
+    // a slider at 1.0 was applying 1.25 stops.
+    exposure: 1.0,
     brightness: 0.8,
     contrast: 100.0,
     highlights: 120.0,
@@ -1772,6 +1931,46 @@ fn rotate_and_scale_primary(primary: Vec2, white_point: Vec2, scale: f32, rotati
     white_point + p_rotated
 }
 
+// ================== BLITZRAW: camera-calibrated white balance ==================
+
+/// Row-major to the column-major layout WGSL expects.
+pub(crate) fn rows_to_gpu_mat3(m: crate::camera_profile::Matrix3) -> GpuMat3 {
+    GpuMat3 {
+        col0: [m[0][0], m[1][0], m[2][0], 0.0],
+        col1: [m[0][1], m[1][1], m[2][1], 0.0],
+        col2: [m[0][2], m[1][2], m[2][2], 0.0],
+    }
+}
+
+/// Fills in the white balance matrix for an image that has a camera profile.
+///
+/// A separate step rather than another argument to
+/// `get_all_adjustments_from_json`, which has eight call sites and belongs to
+/// upstream. Adding a line at the few sites that render a real file conflicts
+/// far less on merge than changing a signature everywhere.
+///
+/// Does nothing when the file has no profile, which leaves `use_camera_profile`
+/// at zero and the old linear tint in charge, exactly as before.
+pub fn apply_camera_profile_to_adjustments(
+    all: &mut AllAdjustments,
+    path: &str,
+    js_adjustments: &serde_json::Value,
+) {
+    let Some(profile) = crate::camera_profile::profile_for(path) else {
+        return;
+    };
+    let wb = crate::camera_profile::white_balance_from_json(js_adjustments, &profile);
+    let Some(correction) = profile.relative_correction(wb.kelvin, wb.tint) else {
+        log::warn!("Camera profile for {path} produced no usable white balance matrix");
+        return;
+    };
+
+    all.global.camera_to_working = rows_to_gpu_mat3(correction);
+    all.global.use_camera_profile = 1;
+}
+
+// ================ BLITZRAW END: camera-calibrated white balance ================
+
 fn mat3_to_gpu_mat3(m: Mat3) -> GpuMat3 {
     GpuMat3 {
         col0: [m.x_axis.x, m.x_axis.y, m.x_axis.z, 0.0],
@@ -1827,6 +2026,24 @@ fn calculate_agx_matrices() -> (GpuMat3, GpuMat3) {
         mat3_to_gpu_mat3(rendering_to_pipe),
     )
 }
+
+// ============ BLITZRAW: the colour accordion is three accordions ============
+// The editor split one "Color" section into three: `colorCorrection` holds
+// white balance, temperature, tint, vibrance and saturation; `colorMixer` holds
+// the HSL mixer; `color` keeps the grading wheels, the calibration and the
+// global hue. See SECTION_KEYS in src/utils/adjustments.ts.
+//
+// Rust was never told. Everything stayed gated on `color`, so the eye on the
+// Color Correction accordion did nothing at all, and the eye on the Color
+// accordion silently zeroed the temperature, tint, vibrance, saturation and the
+// whole mixer along with the grading it was meant to hide.
+//
+// The names are strings shared across a boundary, which is why they drifted.
+// They are constants now, so the next split moves them in one place.
+const SECTION_COLOR_CORRECTION: &str = "colorCorrection";
+const SECTION_COLOR_MIXER: &str = "colorMixer";
+const SECTION_COLOR: &str = "color";
+// ========== BLITZRAW END: the colour accordion is three accordions ==========
 
 pub fn resolve_tonemapper_override(settings: &crate::AppSettings, is_raw: bool) -> Option<u32> {
     if !settings.tonemapper_override_enabled.unwrap_or(false) {
@@ -2163,11 +2380,21 @@ fn get_global_adjustments_from_json(
         whites: get_val("basic", "whites", SCALES.whites, None),
         blacks: get_val("basic", "blacks", SCALES.blacks, None),
 
-        saturation: get_val("color", "saturation", SCALES.saturation, None),
-        temperature: get_val("color", "temperature", SCALES.temperature, None),
-        tint: get_val("color", "tint", SCALES.tint, None),
-        vibrance: get_val("color", "vibrance", SCALES.vibrance, None),
-        hue: get_val("color", "hue", 1.0, None),
+        saturation: get_val(
+            SECTION_COLOR_CORRECTION,
+            "saturation",
+            SCALES.saturation,
+            None,
+        ),
+        temperature: get_val(
+            SECTION_COLOR_CORRECTION,
+            "temperature",
+            SCALES.temperature,
+            None,
+        ),
+        tint: get_val(SECTION_COLOR_CORRECTION, "tint", SCALES.tint, None),
+        vibrance: get_val(SECTION_COLOR_CORRECTION, "vibrance", SCALES.vibrance, None),
+        hue: get_val(SECTION_COLOR, "hue", 1.0, None),
         _pad_color1: 0.0,
         _pad_color2: 0.0,
         _pad_color3: 0.0,
@@ -2293,7 +2520,7 @@ fn get_global_adjustments_from_json(
 
         color_calibration: color_cal_settings,
 
-        hsl: if is_visible("color") {
+        hsl: if is_visible(SECTION_COLOR_MIXER) {
             parse_hsl_adjustments(&js_adjustments.get("hsl").cloned().unwrap_or_default())
         } else {
             [HslColor::default(); 8]
@@ -2320,6 +2547,14 @@ fn get_global_adjustments_from_json(
             SCALES.sharpness_threshold,
             Some(15.0),
         ),
+
+        // BLITZRAW: filled in later by apply_camera_profile_to_adjustments,
+        // which is the only place that knows which file is being rendered.
+        camera_to_working: GpuMat3::default(),
+        use_camera_profile: 0,
+        _pad_wb1: 0.0,
+        _pad_wb2: 0.0,
+        _pad_wb3: 0.0,
     }
 }
 
@@ -2376,10 +2611,10 @@ fn get_mask_adjustments_from_json(adj: &serde_json::Value) -> MaskAdjustments {
         whites: get_val("basic", "whites", SCALES.whites),
         blacks: get_val("basic", "blacks", SCALES.blacks),
 
-        saturation: get_val("color", "saturation", SCALES.saturation),
-        temperature: get_val("color", "temperature", SCALES.temperature),
-        tint: get_val("color", "tint", SCALES.tint),
-        vibrance: get_val("color", "vibrance", SCALES.vibrance),
+        saturation: get_val(SECTION_COLOR_CORRECTION, "saturation", SCALES.saturation),
+        temperature: get_val(SECTION_COLOR_CORRECTION, "temperature", SCALES.temperature),
+        tint: get_val(SECTION_COLOR_CORRECTION, "tint", SCALES.tint),
+        vibrance: get_val(SECTION_COLOR_CORRECTION, "vibrance", SCALES.vibrance),
 
         sharpness: get_val("details", "sharpness", SCALES.sharpness),
         luma_noise_reduction: get_val("details", "lumaNoiseReduction", SCALES.luma_noise_reduction),
@@ -2398,7 +2633,7 @@ fn get_mask_adjustments_from_json(adj: &serde_json::Value) -> MaskAdjustments {
         flare_amount: get_val("effects", "flareAmount", SCALES.flares),
         sharpness_threshold: get_val("details", "sharpnessThreshold", SCALES.sharpness_threshold),
 
-        hue: get_val("color", "hue", 1.0),
+        hue: get_val(SECTION_COLOR, "hue", 1.0),
         _pad_cg1: 0.0,
         _pad_cg2: 0.0,
         color_grading_shadows: if is_visible("color") {
@@ -2434,7 +2669,7 @@ fn get_mask_adjustments_from_json(adj: &serde_json::Value) -> MaskAdjustments {
         _pad5: 0.0,
         _pad6: 0.0,
 
-        hsl: if is_visible("color") {
+        hsl: if is_visible(SECTION_COLOR_MIXER) {
             parse_hsl_adjustments(&adj.get("hsl").cloned().unwrap_or_default())
         } else {
             [HslColor::default(); 8]
@@ -2680,7 +2915,38 @@ fn apply_gentle_detail_enhance(
                 } else {
                     amount
                 };
-                let boost = detail * adaptive_amount;
+
+                // ========== BLITZRAW: do not sharpen the noise ==========
+                // The rule above gives strong edges less and everything else
+                // the full amount. At high ISO "everything else" is mostly
+                // noise, so the setting was sharpening the noise hardest of
+                // all. Measured on an event frame at 0.35: the fine grain came
+                // out 30 percent louder while real detail gained only 11. That
+                // is the wrong way round, and it happens before anything
+                // downstream has a chance to clean it.
+                //
+                // So a detail smaller than the noise at this brightness is left
+                // alone. The curve is the sensor's own: shot noise grows with
+                // the square root of the signal, read noise sets a floor. Both
+                // numbers were measured; see `noise_probe` in denoising.rs.
+                //
+                // Nothing is turned off by this. A real edge is many times the
+                // noise and still gets the full amount asked for.
+                const NOISE_AT_MID: f32 = 0.0073;
+                const READ_FLOOR: f32 = 0.0034;
+                const MID: f32 = 0.18;
+                const KEEP_ABOVE: f32 = 2.0;
+
+                let noise = NOISE_AT_MID
+                    * ((original_luma.max(0.0) + READ_FLOOR) / (MID + READ_FLOOR)).sqrt();
+                let floor = KEEP_ABOVE * noise;
+                // Smooth rather than a step, so grain does not come and go
+                // across a gradient. Zero well under the noise, one well over.
+                let d2 = detail * detail;
+                let gate = d2 / (d2 + floor * floor + 1e-12);
+
+                let boost = detail * adaptive_amount * gate;
+                // ======== BLITZRAW END: do not sharpen the noise ========
 
                 let r_idx = x * 3;
                 let g_idx = r_idx + 1;
@@ -2897,11 +3163,50 @@ pub fn calculate_waveform_from_image(
         return Err("Image has zero dimensions.".to_string());
     }
 
-    let do_rgb = active_channel.is_none() || active_channel == Some("rgb");
-    let do_luma =
-        active_channel.is_none() || active_channel == Some("luma") || active_channel == Some("rgb");
-    let do_parade = active_channel.is_none() || active_channel == Some("parade");
-    let do_vectorscope = active_channel.is_none() || active_channel == Some("vectorscope");
+    // BLITZRAW: a list, not a single name, so a column of scopes costs one pass
+    // over the pixels rather than one per scope. Empty still means all of them,
+    // which is what an older caller passing None relied on.
+    //
+    // A name may carry a number after a colon, `vectorscope:3`. Only the
+    // vectorscope reads one, and it means the gain on the trace. The number
+    // rides in the request rather than in a parameter of its own because the
+    // request is the one thing that already travels the whole way from the
+    // panel to here: through the command, the job and the worker, four structs
+    // and eight signatures, none of which are ours. A scope's name and how it
+    // is to be drawn are the same kind of thing anyway.
+    let wanted: Vec<&str> = active_channel
+        .map(|list| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    fn name_of(token: &str) -> &str {
+        token.split(':').next().unwrap_or(token)
+    }
+    let asked_for = |name: &str| wanted.is_empty() || wanted.iter().any(|c| name_of(c) == name);
+
+    // Above 1.0 the trace spreads out from the centre so a nearly neutral image
+    // can be read at all, which is what Resolve's vectorscope gain does. The
+    // graticule is drawn at a fixed size and does not move with it, or the
+    // reading would mean nothing. Clamped, because a gain of zero collapses
+    // every colour onto the centre and a huge one puts the whole picture on the
+    // rim, and neither says anything.
+    let vector_gain: f32 = wanted
+        .iter()
+        .find(|c| name_of(c) == "vectorscope")
+        .and_then(|c| c.split_once(':'))
+        .and_then(|(_, gain)| gain.parse::<f32>().ok())
+        .filter(|gain| gain.is_finite())
+        .unwrap_or(1.0)
+        .clamp(1.0, 8.0);
+
+    let do_rgb = asked_for("rgb");
+    // RGB draws its luma trace over the channels, so it needs both.
+    let do_luma = asked_for("luma") || do_rgb;
+    let do_parade = asked_for("parade");
+    let do_vectorscope = asked_for("vectorscope");
 
     let mut red_bins = if do_rgb { vec![0u32; W * H] } else { vec![] };
     let mut green_bins = if do_rgb { vec![0u32; W * H] } else { vec![] };
@@ -2951,9 +3256,12 @@ pub fn calculate_waveform_from_image(
             let g_f = g as f32;
             let b_f = b as f32;
 
-            let mut cb = (-0.1146 * r_f - 0.3854 * g_f + 0.5 * b_f) * 0.836;
-            let mut cr = (0.5 * r_f - 0.4542 * g_f - 0.0458 * b_f) * 0.836;
+            let mut cb = (-0.1146 * r_f - 0.3854 * g_f + 0.5 * b_f) * 0.836 * vector_gain;
+            let mut cr = (0.5 * r_f - 0.4542 * g_f - 0.0458 * b_f) * 0.836 * vector_gain;
 
+            // The clamp is after the gain on purpose, so a magnified colour
+            // that runs out of room sits on the rim rather than wrapping or
+            // vanishing. That is what the reading should say: off the scale.
             let dist_sq = cb * cb + cr * cr;
             if dist_sq > 16129.0 {
                 let scale = 127.0 / dist_sq.sqrt();
@@ -3427,4 +3735,246 @@ pub fn calculate_auto_adjustments(
     let results = perform_auto_analysis(&original_image);
 
     Ok(auto_results_to_json(&results))
+}
+
+// ================== BLITZRAW: camera-calibrated white balance ==================
+#[cfg(test)]
+mod blitzraw_uniform_tests {
+    use super::*;
+
+    /// `GlobalAdjustments` is a byte-for-byte mirror of the struct in
+    /// shader.wgsl. WGSL aligns `mat3x3<f32>` to 16 bytes, and if the field
+    /// lands anywhere else the shader silently reads every following value from
+    /// the wrong offset, which shows up as corrupted colour rather than an
+    /// error. Appending the white balance fields relied on the struct already
+    /// ending on a 16-byte boundary, so that assumption is held here.
+    #[test]
+    fn uniform_layout_matches_the_shader() {
+        let matrix_offset = std::mem::offset_of!(GlobalAdjustments, camera_to_working);
+        assert_eq!(
+            matrix_offset % 16,
+            0,
+            "camera_to_working sits at offset {matrix_offset}, which WGSL cannot align a mat3x3 to"
+        );
+
+        assert_eq!(
+            std::mem::size_of::<GpuMat3>(),
+            48,
+            "a WGSL mat3x3<f32> occupies three padded vec4s"
+        );
+
+        let size = std::mem::size_of::<GlobalAdjustments>();
+        assert_eq!(
+            size % 16,
+            0,
+            "GlobalAdjustments is {size} bytes, which is not a whole number of 16-byte rows"
+        );
+    }
+
+    /// WGSL matrices are column-major and ours are row-major, so the handover
+    /// transposes. Getting it backwards would still render, just with the
+    /// colour channels mixed, which is easy to miss and hard to trace.
+    #[test]
+    fn matrix_handover_is_column_major() {
+        let rows: crate::camera_profile::Matrix3 =
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        let gpu = rows_to_gpu_mat3(rows);
+        assert_eq!(gpu.col0, [1.0, 4.0, 7.0, 0.0], "first column");
+        assert_eq!(gpu.col1, [2.0, 5.0, 8.0, 0.0], "second column");
+        assert_eq!(gpu.col2, [3.0, 6.0, 9.0, 0.0], "third column");
+    }
+}
+// ================ BLITZRAW END: camera-calibrated white balance ================
+
+#[cfg(test)]
+mod scope_channel_tests {
+    use super::*;
+
+    fn grey_ramp() -> DynamicImage {
+        // A ramp rather than a flat field: a vectorscope of pure grey is a dot,
+        // and a dot proves nothing about whether the bins were filled.
+        DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(64, 64, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 4) as u8, 128])
+        }))
+    }
+
+    /// A column of scopes asks for several at once, as one comma-separated
+    /// string, so the pixels are walked once however many are on screen.
+    #[test]
+    fn a_list_of_channels_fills_exactly_those_scopes() {
+        let image = grey_ramp();
+
+        let one = calculate_waveform_from_image(&image, Some("parade")).expect("parade");
+        assert!(
+            !one.parade.is_empty(),
+            "the scope that was asked for is there"
+        );
+        assert!(
+            one.vectorscope.is_empty(),
+            "and the ones that were not are not"
+        );
+        assert!(one.rgb.is_empty());
+
+        let two = calculate_waveform_from_image(&image, Some("parade,vectorscope")).expect("both");
+        assert!(
+            !two.parade.is_empty(),
+            "both of a two-scope column are filled"
+        );
+        assert!(!two.vectorscope.is_empty());
+        assert!(two.rgb.is_empty(), "and nothing else is");
+        assert_eq!(
+            two.parade, one.parade,
+            "asking for more does not change the answer"
+        );
+    }
+
+    /// How far the lit pixels of a vectorscope sit from the centre, on average.
+    ///
+    /// The graticule is drawn into the same buffer at a fixed size, so only
+    /// pixels away from the rings and the crosshair are counted; otherwise the
+    /// furniture, which never moves, would drown out the trace, which does.
+    fn mean_trace_radius(vectorscope: &str) -> f32 {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(vectorscope)
+            .expect("the vectorscope comes back as base64 rgba");
+        let mut total = 0.0f64;
+        let mut lit = 0u32;
+        for y in 0..256usize {
+            for x in 0..256usize {
+                let off = (y * 256 + x) * 4;
+                if bytes[off + 3] < 40 {
+                    continue;
+                }
+                let dx = x as f32 - 128.0;
+                let dy = 128.0 - y as f32;
+                let radius = (dx * dx + dy * dy).sqrt();
+                // The furniture: the crosshair, the two rings, the skin line.
+                if dx.abs().min(dy.abs()) <= 2.0
+                    || (radius - 127.0).abs() < 2.0
+                    || (radius - 64.0).abs() < 2.0
+                {
+                    continue;
+                }
+                total += radius as f64;
+                lit += 1;
+            }
+        }
+        assert!(
+            lit > 0,
+            "the trace should light something that is not the graticule"
+        );
+        (total / lit as f64) as f32
+    }
+
+    /// Gain spreads the trace out from the centre so a nearly neutral image can
+    /// be read. Resolve calls it the same thing.
+    #[test]
+    fn vectorscope_gain_pushes_the_trace_outwards() {
+        let image = grey_ramp();
+
+        let plain = calculate_waveform_from_image(&image, Some("vectorscope")).expect("plain");
+        let doubled = calculate_waveform_from_image(&image, Some("vectorscope:2")).expect("2x");
+        let quadrupled = calculate_waveform_from_image(&image, Some("vectorscope:4")).expect("4x");
+
+        let r1 = mean_trace_radius(&plain.vectorscope);
+        let r2 = mean_trace_radius(&doubled.vectorscope);
+        let r4 = mean_trace_radius(&quadrupled.vectorscope);
+
+        assert!(
+            r2 > r1 * 1.5,
+            "2x should be most of twice as far out: {r1} then {r2}"
+        );
+        assert!(r4 > r2, "and 4x further still: {r2} then {r4}");
+        // Not exactly 2x and 4x, because the rim clamps whatever runs out of
+        // room, which is the reading saying "off the scale" rather than a fault.
+        assert!(r4 <= 127.0, "nothing escapes the graticule: {r4}");
+    }
+
+    /// A gain of one is the request without a gain at all, to the byte. Worth
+    /// holding, because the parsing is shared and a scope that quietly changed
+    /// when nobody asked it to would be hard to notice.
+    #[test]
+    fn a_gain_of_one_changes_nothing() {
+        let image = grey_ramp();
+        let plain = calculate_waveform_from_image(&image, Some("vectorscope")).expect("plain");
+        let explicit = calculate_waveform_from_image(&image, Some("vectorscope:1")).expect("1x");
+        assert_eq!(plain.vectorscope, explicit.vectorscope);
+    }
+
+    /// The number is part of the name, so a scope carrying one is still asked
+    /// for, and the scopes beside it in the list are unaffected.
+    #[test]
+    fn a_gain_does_not_stop_a_scope_being_recognised() {
+        let image = grey_ramp();
+        let both =
+            calculate_waveform_from_image(&image, Some("parade,vectorscope:3")).expect("both");
+        assert!(
+            !both.vectorscope.is_empty(),
+            "the scope with the number is still drawn"
+        );
+        assert!(!both.parade.is_empty(), "and so is the one beside it");
+        assert!(both.rgb.is_empty(), "and nothing that was not asked for");
+    }
+
+    /// Nonsense in the request should read as no gain rather than as no scope.
+    /// It arrives from a joined list in the front end, so a stray character is
+    /// a typing accident and not a reason to draw nothing.
+    #[test]
+    fn a_gain_that_makes_no_sense_is_ignored_not_obeyed() {
+        let image = grey_ramp();
+        let plain = calculate_waveform_from_image(&image, Some("vectorscope")).expect("plain");
+        for request in [
+            "vectorscope:",
+            "vectorscope:x",
+            "vectorscope:-2",
+            "vectorscope:0",
+        ] {
+            let odd = calculate_waveform_from_image(&image, Some(request)).expect(request);
+            assert_eq!(
+                odd.vectorscope, plain.vectorscope,
+                "{request} should draw as if plain"
+            );
+        }
+    }
+
+    /// Whitespace and stray separators come from joining a list in the front
+    /// end, and an empty request is not the same as asking for everything.
+    #[test]
+    fn the_list_is_read_forgivingly() {
+        let image = grey_ramp();
+        let spaced =
+            calculate_waveform_from_image(&image, Some(" parade , vectorscope ,")).expect("spaced");
+        assert!(!spaced.parade.is_empty());
+        assert!(!spaced.vectorscope.is_empty());
+        assert!(spaced.rgb.is_empty());
+    }
+
+    /// None means all of them, which is what the callers that predate the list
+    /// relied on, and an empty string has to mean the same rather than nothing.
+    #[test]
+    fn nothing_asked_for_still_means_everything() {
+        let image = grey_ramp();
+        for request in [None, Some(""), Some(" ")] {
+            let all = calculate_waveform_from_image(&image, request).expect("all");
+            assert!(
+                !all.parade.is_empty(),
+                "{request:?} should give every scope"
+            );
+            assert!(!all.vectorscope.is_empty(), "{request:?}");
+            assert!(!all.rgb.is_empty(), "{request:?}");
+            assert!(!all.luma.is_empty(), "{request:?}");
+        }
+    }
+
+    /// RGB draws its luma trace over the channels, so asking for RGB alone has
+    /// to fill luma too or the trace is missing.
+    #[test]
+    fn rgb_brings_luma_with_it() {
+        let image = grey_ramp();
+        let rgb = calculate_waveform_from_image(&image, Some("rgb")).expect("rgb");
+        assert!(!rgb.rgb.is_empty());
+        assert!(!rgb.luma.is_empty(), "the luma trace RGB draws on top");
+        assert!(rgb.parade.is_empty(), "but not the ones it does not draw");
+    }
 }
