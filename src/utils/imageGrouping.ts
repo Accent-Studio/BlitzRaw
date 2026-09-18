@@ -55,8 +55,22 @@ export function buildImageGroups(
   return { displayList, badges };
 }
 
+/**
+ * Picks which RAW represents a capture that exists as more than one RAW file.
+ *
+ * A DNG sitting beside a NEF is normally the result of converting that NEF,
+ * and for Nikon High Efficiency files it is the only one any open source
+ * decoder can actually develop. Preferring it means the group shows the file
+ * the conversion was run to produce, rather than whichever happened to be
+ * enumerated first.
+ */
+function pickRaw(files: ImageFile[]): ImageFile | undefined {
+  const raws = files.filter((f) => f.is_raw);
+  return raws.find((f) => getFileExtension(f.path) === 'dng') ?? raws[0];
+}
+
 function pickPrimary(files: ImageFile[], preference: GroupPreference): ImageFile {
-  const raw = files.find((f) => f.is_raw);
+  const raw = pickRaw(files);
   const nonRaw = files.find((f) => !f.is_raw);
 
   switch (preference) {

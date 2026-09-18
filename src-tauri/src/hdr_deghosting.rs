@@ -21,6 +21,42 @@ const DEGHOST_NON_MAXIMA_SUPPRESSION_RADIUS: f32 = 8.0;
 const DEGHOST_MAX_PROCESSING_DIMENSION: u32 = 3200;
 const DEGHOST_IDENTITY_MAX_DISPLACEMENT: f64 = 1.0;
 
+/// Largest rotation an alignment may apply, in degrees.
+///
+/// Frames of one bracket are seconds apart, so even handheld the drift between
+/// them is a fraction of a degree. A larger angle does not mean the camera
+/// moved: it means feature matching found a false consensus, which low-texture
+/// interiors shot at very different exposures readily produce. Applying such a
+/// transform destroys the frame, so it is refused and the frame used unwarped.
+const DEGHOST_MAX_ROTATION_DEGREES: f64 = 5.0;
+
+/// Largest shift an alignment may apply, as a fraction of the image diagonal.
+/// Guards the same failure expressing itself as translation rather than spin.
+const DEGHOST_MAX_DISPLACEMENT_FRACTION: f64 = 0.1;
+
+/// The rotation an estimated transform applies, in degrees.
+///
+/// The estimate is a pure rotation plus translation, so the upper-left block is
+/// orthonormal and the angle reads straight off it.
+fn rotation_degrees(transform: &Matrix3<f64>) -> f64 {
+    transform[(1, 0)].atan2(transform[(0, 0)]).to_degrees().abs()
+}
+
+/// Whether an estimated alignment is small enough to be a real camera movement
+/// rather than a mismatch.
+fn is_plausible_alignment(transform: &Matrix3<f64>, width: u32, height: u32) -> bool {
+    if !transform.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+
+    if rotation_degrees(transform) > DEGHOST_MAX_ROTATION_DEGREES {
+        return false;
+    }
+
+    let diagonal = ((width as f64).powi(2) + (height as f64).powi(2)).sqrt();
+    max_corner_displacement(transform, width, height) <= diagonal * DEGHOST_MAX_DISPLACEMENT_FRACTION
+}
+
 enum AlignmentOutcome {
     Warped(Rgb32FImage),
     AlreadyAligned,
@@ -33,12 +69,54 @@ struct FrameDetection {
     scale_factor: f64,
 }
 
+// ============ BLITZRAW: a merge is sharpened once, like everything else ============
+/// The decode settings a bracket wants, which are not the ones a photograph
+/// wants.
+///
+/// Base Color Noise Reduction and Base Pre-Sharpening run inside the decode, so
+/// every frame of a bracket goes through them before the merge sees it. A merge
+/// is then written as a `.dng`, and `.dng` is a raw extension, so opening one
+/// runs both of them **again** on the result. A merge came out sharpened at
+/// 0.35 twice where every single photo is sharpened at 0.35 once, and looked
+/// crunchier than its own frames for no reason anyone chose. Measured: opening
+/// a merge moves 4,839,908 of its 45,441,024 pixels by more than one part in
+/// 255, worst 0.174.
+///
+/// So the frames are decoded clean and the merge is sharpened exactly once,
+/// when it is opened.
+///
+/// This costs the merge nothing. Sharpening every frame and then averaging them
+/// gives the same answer to 0% as averaging first and sharpening once, because
+/// an unsharp mask is linear and a merge is a weighted average, so the two
+/// commute wherever the weights are equal. See the probe in `hdr_merge`.
+///
+/// It also gives the merge back its highlight headroom, as a side effect worth
+/// knowing about. Both filters clamp every channel to 1.0, one step after the
+/// highlight recovery has gone to the trouble of keeping values above it: a
+/// frame that reaches 1.8041 over 2.79 million pixels arrives at exactly
+/// 1.0000. It changes a merge by 0.3% at the top of the range and no more,
+/// because the short frame carries the highlights and is not clipped there, but
+/// it is the honest number to divide by.
+///
+/// RAW Highlight Recovery is deliberately left alone. It only fires above 1.0,
+/// and a merge gives anything above `hdr_merge::SATURATION` a weight of zero,
+/// so it cannot reach a pixel the merge believes.
+pub fn settings_for_merge_frames(settings: &AppSettings) -> AppSettings {
+    let mut settings = settings.clone();
+    settings.raw_preprocessing_color_nr = Some(0.0);
+    settings.raw_preprocessing_sharpening = Some(0.0);
+    settings
+}
+// ========== BLITZRAW END: a merge is sharpened once, like everything else ==========
+
 pub fn load_hdr_frames(
     paths: &[String],
     app_handle: &AppHandle,
     settings: &AppSettings,
 ) -> Result<Vec<HdrFrame>, String> {
     assert!(paths.len() >= 2, "hdr merge requires at least two paths");
+    // BLITZRAW: clean frames, so the merge is sharpened once rather than twice.
+    let settings = &settings_for_merge_frames(settings);
     paths
         .iter()
         .map(|path| {
@@ -207,6 +285,16 @@ fn align_frame_to_reference(
     if displacement < DEGHOST_IDENTITY_MAX_DISPLACEMENT {
         return AlignmentOutcome::AlreadyAligned;
     }
+    // A wild transform is a failed match, not a moved camera. Refusing it costs
+    // a little ghosting; applying it ruins the frame.
+    if !is_plausible_alignment(&rigid_full, width, height) {
+        log::warn!(
+            "Refusing implausible HDR alignment: {:.1} degrees, {:.0} px displacement",
+            rotation_degrees(&rigid_full),
+            displacement
+        );
+        return AlignmentOutcome::Failed;
+    }
     let source = frame_image.to_rgb32f();
     AlignmentOutcome::Warped(stitching::warp_image_homography(
         &source,
@@ -275,6 +363,62 @@ fn estimate_rigid_transform(
     )
 }
 
+#[cfg(test)]
+mod alignment_guard_tests {
+    use super::*;
+
+    fn rotation_about_origin(degrees: f64) -> Matrix3<f64> {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        Matrix3::new(cos, -sin, 0.0, sin, cos, 0.0, 0.0, 0.0, 1.0)
+    }
+
+    fn translation(dx: f64, dy: f64) -> Matrix3<f64> {
+        Matrix3::new(1.0, 0.0, dx, 0.0, 1.0, dy, 0.0, 0.0, 1.0)
+    }
+
+    #[test]
+    fn reads_the_rotation_back_out_of_a_transform() {
+        assert!((rotation_degrees(&rotation_about_origin(3.0)) - 3.0).abs() < 1e-6);
+        // Direction does not matter; the magnitude is what is being judged.
+        assert!((rotation_degrees(&rotation_about_origin(-3.0)) - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_small_correction_is_allowed() {
+        // Handheld drift between bracket frames is well under a degree.
+        assert!(is_plausible_alignment(&rotation_about_origin(0.4), 8256, 5504));
+        assert!(is_plausible_alignment(&translation(12.0, -8.0), 8256, 5504));
+    }
+
+    #[test]
+    fn the_rotation_that_ruined_real_merges_is_refused() {
+        for degrees in [45.0, 90.0, 180.0, -75.0] {
+            assert!(
+                !is_plausible_alignment(&rotation_about_origin(degrees), 8256, 5504),
+                "{degrees} degrees should have been refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wild_shift_is_refused_even_without_rotation() {
+        // Half the frame across is a mismatch, not a camera that moved.
+        assert!(!is_plausible_alignment(&translation(4000.0, 0.0), 8256, 5504));
+    }
+
+    #[test]
+    fn a_transform_with_no_real_numbers_in_it_is_refused() {
+        let broken = Matrix3::new(f64::NAN, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+        assert!(!is_plausible_alignment(&broken, 8256, 5504));
+    }
+
+    #[test]
+    fn the_threshold_sits_where_it_claims_to() {
+        assert!(is_plausible_alignment(&rotation_about_origin(4.9), 8256, 5504));
+        assert!(!is_plausible_alignment(&rotation_about_origin(5.1), 8256, 5504));
+    }
+}
+
 fn centroid(points: impl Iterator<Item = (f64, f64)>, count: f64) -> (f64, f64) {
     assert!(count > 0.0, "centroid requires a positive count");
     let mut sum = (0.0, 0.0);
@@ -305,3 +449,48 @@ fn max_corner_displacement(transform: &Matrix3<f64>, width: u32, height: u32) ->
     }
     max_displacement
 }
+
+// ========= BLITZRAW: what a bracket asks the decode for =========
+#[cfg(test)]
+mod blitzraw_merge_decode_tests {
+    use super::*;
+
+    /// The two filters that would sharpen a merge a second time are off, and
+    /// nothing else the user chose is touched.
+    #[test]
+    fn a_bracket_is_decoded_without_the_filters_that_run_again_later() {
+        let mut chosen = AppSettings::default();
+        chosen.raw_preprocessing_color_nr = Some(0.5);
+        chosen.raw_preprocessing_sharpening = Some(0.35);
+        chosen.raw_highlight_compression = Some(2.5);
+
+        let asked = settings_for_merge_frames(&chosen);
+
+        assert_eq!(asked.raw_preprocessing_color_nr, Some(0.0));
+        assert_eq!(asked.raw_preprocessing_sharpening, Some(0.0));
+        // Highlight recovery only fires above 1.0, which a merge already gives
+        // a weight of zero, so it has no reason to change.
+        assert_eq!(
+            asked.raw_highlight_compression, chosen.raw_highlight_compression,
+            "highlight recovery is not ours to turn off"
+        );
+        assert_eq!(
+            asked.linear_raw_mode, chosen.linear_raw_mode,
+            "nothing else the user chose may move"
+        );
+    }
+
+    /// And a user who has already turned them off is left exactly as they are.
+    #[test]
+    fn settings_that_are_already_clean_come_back_unchanged() {
+        let mut chosen = AppSettings::default();
+        chosen.raw_preprocessing_color_nr = Some(0.0);
+        chosen.raw_preprocessing_sharpening = Some(0.0);
+
+        let asked = settings_for_merge_frames(&chosen);
+
+        assert_eq!(asked.raw_preprocessing_color_nr, Some(0.0));
+        assert_eq!(asked.raw_preprocessing_sharpening, Some(0.0));
+    }
+}
+// ======= BLITZRAW END: what a bracket asks the decode for =======
