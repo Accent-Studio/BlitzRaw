@@ -26,6 +26,7 @@ import { Adjustments } from '../../utils/adjustments';
 import { SelectedImage } from '../ui/AppProperties';
 import clsx from 'clsx';
 import Text from '../ui/Text';
+import { exifNumber } from '../../utils/lensAutodetect';
 import { TextColors, TextVariants } from '../../types/typography';
 
 interface GeometryParams {
@@ -103,23 +104,10 @@ const DEFAULT_PARAMS: LensParams = {
   lensDistortionParams: null,
 };
 
-const parseFocalLength = (exif: any): number | null => {
-  if (!exif || !exif.FocalLength) return null;
-  const val = parseFloat(exif.FocalLength);
-  return isNaN(val) ? null : val;
-};
-
-const parseAperture = (exif: any): number | null => {
-  if (!exif || !exif.FNumber) return null;
-  const val = parseFloat(exif.FNumber);
-  return isNaN(val) ? null : val;
-};
-
-const parseDistance = (exif: any): number | null => {
-  if (!exif || !exif.SubjectDistance) return null;
-  const val = parseFloat(exif.SubjectDistance);
-  return isNaN(val) ? null : val;
-};
+// Shared with the preset path, so both ask the lens database the same question.
+const parseFocalLength = (exif: any): number | null => exifNumber(exif?.FocalLength);
+const parseAperture = (exif: any): number | null => exifNumber(exif?.FNumber);
+const parseDistance = (exif: any): number | null => exifNumber(exif?.SubjectDistance);
 
 const SLIDER_DIVISOR = 100.0;
 

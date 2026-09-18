@@ -38,6 +38,11 @@ export const createSubMask = (
       };
     case Mask.Brush:
       return { ...common, parameters: { lines: [] } };
+    // BLITZRAW: a pen mask starts with nothing and is placed click by click.
+    // `isDrawing` keeps the canvas in placing mode until the path is closed or
+    // finished, which is the only state the other shapes do not need.
+    case Mask.Pen:
+      return { ...common, parameters: { points: [], closed: false, isDrawing: true, grow: 0, feather: 0 } };
     case Mask.Flow:
       return { ...common, parameters: { lines: [], flow: 10 } };
     case Mask.AiSubject:

@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { KELVIN_STEP } from '../../adjustments/Color';
 import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
-import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect } from 'react-konva';
+import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect, Shape } from 'react-konva';
 import { PercentCrop, Crop } from 'react-image-crop';
 import { Stamp, Bandage } from 'lucide-react';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
@@ -12,6 +14,26 @@ import { useOsPlatform } from '../../../hooks/useOsPlatform';
 import { useTranslation } from 'react-i18next';
 import type { OverlayMode } from '../right/CropPanel';
 import CompositionOverlays from './overlays/CompositionOverlays';
+import RotationHandles from './overlays/RotationHandles';
+import SideHandles from './overlays/SideHandles';
+import { useEditorStore } from '../../../store/useEditorStore';
+import { dismissWbPicker } from '../../../utils/wbPicker';
+import { linearFromDrag } from '../../../utils/linearMask';
+import {
+  CLOSE_HIT_RADIUS,
+  HANDLE_DRAG_THRESHOLD,
+  MIN_ANCHORS_FOR_AREA,
+  PenAnchor,
+  closesPath,
+  closestSegment,
+  mirrorHandle,
+  moveAnchor,
+  removeAnchor,
+  splitSegment,
+  toggleAnchorSmooth,
+  tracePenPath,
+  translatePath,
+} from '../../../utils/penMask';
 
 interface CursorPreview {
   visible: boolean;
@@ -37,11 +59,15 @@ interface ImageCanvasProps {
   brushSettings: BrushSettings | null;
   crop: Crop | null;
   finalPreviewUrl: string | null;
+  /** BLITZRAW: the disk preview, shown while the decode runs. */
+  cachedPreviewUrl?: string | null;
   handleCropComplete(c: Crop, cp: PercentCrop): void;
   imageRenderSize: RenderSize;
   isAiEditing: boolean;
   isCropping: boolean;
   isMaskControlHovered: boolean;
+  /** BLITZRAW: whether the red is drawn. The rule is in utils/maskOverlay.ts. */
+  isMaskOverlayWanted: boolean;
   isMasking: boolean;
   isSliderDragging: boolean;
   isStraightenActive: boolean;
@@ -96,6 +122,16 @@ interface MaskOverlayProps {
   offsetX: number;
   offsetY: number;
   stageScale: number;
+  /** BLITZRAW: pen only. Where the cursor is, in canvas pixels, so the path can
+      trail a rubber band to it while points are still being placed. */
+  penCursor?: Coord | null;
+  /** BLITZRAW: pen only. The anchor whose handles are being pulled out, so its
+      handles stay on screen while the rest of the path's stay hidden. */
+  penActiveAnchor?: number;
+  /** BLITZRAW: makes a copy of this sub-mask beside the original and selects it.
+      The overlay can change its own sub-mask but cannot make another one, so
+      the canvas, which holds the whole adjustment, does it. */
+  onDuplicateSubMask?(subMask: SubMask): void;
 }
 
 const getEdgeFadeStyle = (fadeDistancePx: number = 128): React.CSSProperties => ({
@@ -211,6 +247,9 @@ const MaskOverlay = memo(
     offsetX,
     offsetY,
     stageScale,
+    penCursor = null,
+    penActiveAnchor = -1,
+    onDuplicateSubMask,
   }: MaskOverlayProps) => {
     const shapeRef = useRef<any>(null);
     const trRef = useRef<any>(null);
@@ -629,6 +668,216 @@ const MaskOverlay = memo(
       [subMask.id, onMaskInteractionEnd, onUpdate],
     );
 
+    // ============= BLITZRAW: dragging a pen anchor or one of its handles =============
+    // Konva moves the dragged node itself, and the path is drawn from the data
+    // rather than from the node, so every move reads the node's new position,
+    // writes it back into the parameters and leaves the node where the data
+    // now says it is. `lockDragBoundFunc` pins the node so the two can never
+    // disagree by a frame.
+    const penPointerToPhoto = useCallback(
+      (e: any) => {
+        const stage = e.target.getStage();
+        if (!stage) return null;
+        const pos = getPointer(stage);
+        if (!pos) return null;
+        return { x: pos.x / scale + cropX, y: pos.y / scale + cropY };
+      },
+      [getPointer, scale, cropX, cropY],
+    );
+
+    const handlePenDragStart = useCallback(
+      (e: any) => {
+        if (e.evt && typeof e.evt.button === 'number' && e.evt.button !== 0) return;
+        isDragging.current = true;
+        e.cancelBubble = true;
+        onMaskInteractionStart(e);
+      },
+      [onMaskInteractionStart],
+    );
+
+    const handlePenAnchorDragMove = useCallback(
+      (e: any, index: number) => {
+        e.cancelBubble = true;
+        const photo = penPointerToPhoto(e);
+        if (!photo) return;
+
+        const points: Array<PenAnchor> = [...(pRef.current.points || [])];
+        if (!points[index]) return;
+        points[index] = moveAnchor(points[index], photo.x, photo.y);
+
+        const next = { ...pRef.current, points };
+        updateP(next);
+        onPreviewUpdate?.(subMask.id, { parameters: next });
+      },
+      [penPointerToPhoto, updateP, onPreviewUpdate, subMask.id],
+    );
+
+    const handlePenHandleDragMove = useCallback(
+      (e: any, index: number, which: 'handleIn' | 'handleOut') => {
+        e.cancelBubble = true;
+        const photo = penPointerToPhoto(e);
+        if (!photo) return;
+
+        const points: Array<PenAnchor> = [...(pRef.current.points || [])];
+        const anchor = points[index];
+        if (!anchor) return;
+
+        // The far handle follows, mirrored, so a curve stays smooth through
+        // its anchor. Alt breaks the pair and moves only the one being
+        // dragged, which is how a curve is turned into a corner and the only
+        // way to get a cusp at all.
+        const breakPair = e.evt?.altKey === true;
+        const other = which === 'handleIn' ? 'handleOut' : 'handleIn';
+
+        const updated: PenAnchor = { ...anchor, [which]: { x: photo.x, y: photo.y } };
+        if (!breakPair && anchor[other]) {
+          updated[other] = mirrorHandle(anchor, photo);
+        }
+        points[index] = updated;
+
+        const next = { ...pRef.current, points };
+        updateP(next);
+        onPreviewUpdate?.(subMask.id, { parameters: next });
+      },
+      [penPointerToPhoto, updateP, onPreviewUpdate, subMask.id],
+    );
+
+    const handlePenDragEnd = useCallback(
+      (e: any) => {
+        isDragging.current = false;
+        e.cancelBubble = true;
+        onMaskInteractionEnd();
+        onUpdate(subMask.id, { parameters: pRef.current });
+      },
+      [subMask.id, onMaskInteractionEnd, onUpdate],
+    );
+
+    /**
+     * Ctrl takes a point out, Alt turns it between a corner and a curve.
+     *
+     * Both live in the press rather than the click, because the point is
+     * draggable and a press would otherwise start a drag that a click then has
+     * to undo. Cancelling the bubble stops the press reaching the stage under
+     * it as well.
+     */
+    const handlePenAnchorMouseDown = useCallback(
+      (e: any, index: number) => {
+        const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
+        const alt = e.evt?.altKey;
+        if (!ctrl && !alt) {
+          return;
+        }
+
+        e.cancelBubble = true;
+        if (e.evt?.preventDefault) e.evt.preventDefault();
+
+        const points: Array<PenAnchor> = pRef.current.points || [];
+        const updated = ctrl ? removeAnchor(points, index) : toggleAnchorSmooth(points, index);
+        if (updated === points) {
+          return;
+        }
+
+        const next = { ...pRef.current, points: updated };
+        updateP(next);
+        onUpdate(subMask.id, { parameters: next });
+      },
+      [updateP, onUpdate, subMask.id],
+    );
+
+    /**
+     * Ctrl on the outline puts a point where the cursor is.
+     *
+     * The split is exact, so the line does not move when the point appears;
+     * see `splitSegment`. Which segment was clicked is worked out from the
+     * pointer rather than from the shape, because a single Shape draws the
+     * whole path and Konva can only say that something on it was hit.
+     */
+    const handlePenPathMouseDown = useCallback(
+      (e: any) => {
+        const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
+        if (!ctrl) {
+          return;
+        }
+
+        const photo = penPointerToPhoto(e);
+        if (!photo) return;
+
+        const points: Array<PenAnchor> = pRef.current.points || [];
+        const hit = closestSegment(points, true, photo.x, photo.y);
+        if (!hit) return;
+
+        e.cancelBubble = true;
+        if (e.evt?.preventDefault) e.evt.preventDefault();
+
+        const next = { ...pRef.current, points: splitSegment(points, hit.segmentIndex, hit.t) };
+        updateP(next);
+        onUpdate(subMask.id, { parameters: next });
+      },
+      [penPointerToPhoto, updateP, onUpdate, subMask.id],
+    );
+
+    /**
+     * The two gestures that act on the whole path rather than one point of it.
+     *
+     * Ctrl and drag moves it. Alt and click copies it: the copy lands on top of
+     * the original and becomes the selected one, so the Ctrl drag that usually
+     * follows carries the copy and leaves the original where it was. Two
+     * gestures rather than one Alt-drag, because the copy has to exist and be
+     * selected before anything can drag it, and doing both inside one press
+     * means the drag would still belong to the shape that was pressed.
+     */
+    const penBodyDrag = useRef<{ start: Coord; points: Array<PenAnchor> } | null>(null);
+
+    const handlePenBodyMouseDown = useCallback(
+      (e: any) => {
+        const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
+        const alt = e.evt?.altKey;
+        if (!ctrl && !alt) {
+          return;
+        }
+
+        const photo = penPointerToPhoto(e);
+        if (!photo) return;
+
+        e.cancelBubble = true;
+        if (e.evt?.preventDefault) e.evt.preventDefault();
+
+        if (alt && onDuplicateSubMask) {
+          onDuplicateSubMask(subMask);
+          return;
+        }
+
+        isDragging.current = true;
+        onMaskInteractionStart(e);
+        penBodyDrag.current = { start: photo, points: pRef.current.points || [] };
+      },
+      [penPointerToPhoto, onMaskInteractionStart, onDuplicateSubMask, subMask],
+    );
+
+    const handlePenBodyMouseMove = useCallback(
+      (e: any) => {
+        if (!penBodyDrag.current) return;
+        const photo = penPointerToPhoto(e);
+        if (!photo) return;
+
+        e.cancelBubble = true;
+        const { start, points } = penBodyDrag.current;
+        const next = { ...pRef.current, points: translatePath(points, photo.x - start.x, photo.y - start.y) };
+        updateP(next);
+        onPreviewUpdate?.(subMask.id, { parameters: next });
+      },
+      [penPointerToPhoto, updateP, onPreviewUpdate, subMask.id],
+    );
+
+    const handlePenBodyMouseUp = useCallback(() => {
+      if (!penBodyDrag.current) return;
+      penBodyDrag.current = null;
+      isDragging.current = false;
+      onMaskInteractionEnd();
+      onUpdate(subMask.id, { parameters: pRef.current });
+    }, [onMaskInteractionEnd, onUpdate, subMask.id]);
+    // =========== BLITZRAW END: dragging a pen anchor or one of its handles ===========
+
     if (!subMask.visible) {
       return null;
     }
@@ -792,6 +1041,208 @@ const MaskOverlay = memo(
         </Group>
       );
     }
+
+    // ==================== BLITZRAW: the pen mask overlay ====================
+    // The path, its anchors and its handles. It is drawn with a Shape and a
+    // scene function rather than a Konva Line, because a Line cannot mix a
+    // straight run and a curve in the same outline and the whole point of the
+    // pen is that one path does both.
+    //
+    // Handles only appear on the anchors either side of the one being worked
+    // on, plus the last placed. Showing every handle on a twenty point path
+    // buries the picture under furniture, and the ones far from the cursor are
+    // never the ones being reached for.
+    if (subMask.type === Mask.Pen) {
+      const points: Array<PenAnchor> = p.points || [];
+      const isPlacing = p.isDrawing === true;
+
+      if (points.length === 0) {
+        return null;
+      }
+
+      const toCanvas = (pt: { x: number; y: number }) => ({
+        x: (pt.x - cropX) * scale,
+        y: (pt.y - cropY) * scale,
+      });
+
+      // Everything on top of the photo is sized against the zoom, so a handle
+      // stays the same size on screen however far in the picture is scaled.
+      const px = (n: number) => n / stageScale;
+
+      const strokeColour = isSelected ? '#0ea5e9' : 'white';
+      const showFurniture = isSelected || isPlacing;
+
+      return (
+        <Group>
+          {/* The inside of the path, invisible but hit-testable. It carries the
+              two whole-path gestures, Ctrl to move and Alt to copy, and it is
+              also what makes clicking anywhere in a shape select it rather than
+              having to find its outline. Only once the path is finished: while
+              placing, every click belongs to the next point. */}
+          {!isPlacing && (
+            <Shape
+              sceneFunc={(ctx: any, shape: any) => {
+                tracePenPath(ctx, points, toCanvas, true);
+                ctx.fillShape(shape);
+              }}
+              fill="rgba(0,0,0,0.001)"
+              listening={!isToolActive}
+              onClick={handleSelect}
+              onTap={handleSelect}
+              onMouseDown={handlePenBodyMouseDown}
+              onMouseMove={handlePenBodyMouseMove}
+              onMouseUp={handlePenBodyMouseUp}
+              onTouchEnd={handleMaskTouchEnd}
+              onTouchStart={handleMaskTouchStart}
+              onMouseEnter={onMaskMouseEnter}
+              onMouseLeave={(e: any) => {
+                onMaskMouseLeave();
+                handlePenBodyMouseUp();
+                e.target.getStage().container().style.cursor = '';
+              }}
+            />
+          )}
+
+          <Shape
+            sceneFunc={(ctx: any, shape: any) => {
+              tracePenPath(ctx, points, toCanvas, p.closed === true || !isPlacing);
+              ctx.strokeShape(shape);
+            }}
+            stroke={strokeColour}
+            strokeWidth={px(isSelected ? 2 : 1.5)}
+            shadowColor="black"
+            shadowBlur={px(2)}
+            shadowOpacity={0.8}
+            hitStrokeWidth={px(16)}
+            listening={!isToolActive}
+            onClick={handleSelect}
+            onTap={handleSelect}
+            onMouseDown={handlePenPathMouseDown}
+            onTouchEnd={handleMaskTouchEnd}
+            onTouchStart={handleMaskTouchStart}
+            onMouseEnter={(e: any) => {
+              onMaskMouseEnter();
+              if (!isPlacing) e.target.getStage().container().style.cursor = 'copy';
+            }}
+            onMouseLeave={(e: any) => {
+              onMaskMouseLeave();
+              e.target.getStage().container().style.cursor = '';
+            }}
+          />
+
+          {/* The rubber band from the last placed anchor to the cursor. It is
+              the one piece of the path that is not in the data yet, so it is
+              drawn separately and only while placing. */}
+          {isPlacing && penCursor && points.length > 0 && (
+            <Line
+              points={[
+                toCanvas(points[points.length - 1]).x,
+                toCanvas(points[points.length - 1]).y,
+                penCursor.x,
+                penCursor.y,
+              ]}
+              stroke={strokeColour}
+              strokeWidth={px(1)}
+              dash={[px(4), px(4)]}
+              opacity={0.7}
+              listening={false}
+            />
+          )}
+
+          {showFurniture &&
+            points.map((anchor: PenAnchor, index: number) => {
+              const a = toCanvas(anchor);
+              const isFirst = index === 0;
+              const canClose = isPlacing && isFirst && points.length >= MIN_ANCHORS_FOR_AREA;
+              const showHandles =
+                !isPlacing || index === points.length - 1 || index === penActiveAnchor;
+
+              return (
+                <Group key={`pen-${index}`}>
+                  {showHandles && anchor.handleIn && (
+                    <>
+                      <Line
+                        points={[a.x, a.y, toCanvas(anchor.handleIn).x, toCanvas(anchor.handleIn).y]}
+                        stroke="white"
+                        strokeWidth={px(1)}
+                        opacity={0.7}
+                        listening={false}
+                      />
+                      <Circle
+                        x={toCanvas(anchor.handleIn).x}
+                        y={toCanvas(anchor.handleIn).y}
+                        radius={px(4)}
+                        fill="white"
+                        stroke="black"
+                        strokeWidth={px(1)}
+                        draggable={!isPlacing}
+                        dragBoundFunc={lockDragBoundFunc}
+                        onDragStart={handlePenDragStart}
+                        onDragMove={(e: any) => handlePenHandleDragMove(e, index, 'handleIn')}
+                        onDragEnd={handlePenDragEnd}
+                      />
+                    </>
+                  )}
+
+                  {showHandles && anchor.handleOut && (
+                    <>
+                      <Line
+                        points={[a.x, a.y, toCanvas(anchor.handleOut).x, toCanvas(anchor.handleOut).y]}
+                        stroke="white"
+                        strokeWidth={px(1)}
+                        opacity={0.7}
+                        listening={false}
+                      />
+                      <Circle
+                        x={toCanvas(anchor.handleOut).x}
+                        y={toCanvas(anchor.handleOut).y}
+                        radius={px(4)}
+                        fill="white"
+                        stroke="black"
+                        strokeWidth={px(1)}
+                        draggable={!isPlacing}
+                        dragBoundFunc={lockDragBoundFunc}
+                        onDragStart={handlePenDragStart}
+                        onDragMove={(e: any) => handlePenHandleDragMove(e, index, 'handleOut')}
+                        onDragEnd={handlePenDragEnd}
+                      />
+                    </>
+                  )}
+
+                  {/* Square for an anchor, round for a handle, the way every
+                      vector editor tells the two apart. The first anchor grows
+                      while placing, because it is the target that ends the
+                      path and it has to be findable without aiming. */}
+                  <Rect
+                    x={a.x - px(canClose ? 5 : 3.5)}
+                    y={a.y - px(canClose ? 5 : 3.5)}
+                    width={px(canClose ? 10 : 7)}
+                    height={px(canClose ? 10 : 7)}
+                    fill={isFirst && isPlacing ? '#0ea5e9' : 'white'}
+                    stroke="black"
+                    strokeWidth={px(1)}
+                    draggable={!isPlacing}
+                    dragBoundFunc={lockDragBoundFunc}
+                    onMouseDown={(e: any) => handlePenAnchorMouseDown(e, index)}
+                    onDragStart={handlePenDragStart}
+                    onDragMove={(e: any) => handlePenAnchorDragMove(e, index)}
+                    onDragEnd={handlePenDragEnd}
+                    onMouseEnter={(e: any) => {
+                      onMaskMouseEnter();
+                      if (!isPlacing) e.target.getStage().container().style.cursor = 'move';
+                    }}
+                    onMouseLeave={(e: any) => {
+                      onMaskMouseLeave();
+                      e.target.getStage().container().style.cursor = '';
+                    }}
+                  />
+                </Group>
+              );
+            })}
+        </Group>
+      );
+    }
+    // ================== BLITZRAW END: the pen mask overlay ==================
 
     if (subMask.type === Mask.Radial) {
       const { centerX, centerY, radiusX, radiusY, rotation } = p;
@@ -1146,12 +1597,14 @@ const ImageCanvas = memo(
     brushSettings,
     crop,
     finalPreviewUrl,
+    cachedPreviewUrl,
     handleCropComplete,
     imageRenderSize,
     interactivePatch,
     isAiEditing,
     isCropping,
     isMaskControlHovered,
+    isMaskOverlayWanted,
     isMasking,
     isSliderDragging,
     isStraightenActive,
@@ -1190,7 +1643,6 @@ const ImageCanvas = memo(
     const [displayedMaskUrl, setDisplayedMaskUrl] = useState<string | null>(null);
     const [originalLoaded, setOriginalLoaded] = useState<boolean>(false);
     const [localInitialDrawParams, setLocalInitialDrawParams] = useState<any>(null);
-    const [isMaskInteractionActive, setIsMaskInteractionActive] = useState(false);
     const [hoveredMarkerId, setHoveredMarkerId] = useState<string | null>(null);
     const isDrawing = useRef(false);
     const drawingStageRef = useRef<any>(null);
@@ -1202,11 +1654,20 @@ const ImageCanvas = memo(
     const activeStrokeIndex = useRef<number | null>(null);
 
     const [cursorPreview, setCursorPreview] = useState<CursorPreview>({ x: 0, y: 0, visible: false });
+
+    // ================== BLITZRAW: what the pen needs while placing ==================
+    // The rubber band's far end, and which anchor is having its handles pulled.
+    // Both are about the gesture rather than the path, so neither belongs in
+    // the mask's parameters: nothing here should end up in a sidecar.
+    const [penCursor, setPenCursor] = useState<Coord | null>(null);
+    const penDrag = useRef<{ index: number; start: Coord } | null>(null);
+    // ================ BLITZRAW END: what the pen needs while placing ================
+
     const [straightenLine, setStraightenLine] = useState<any>(null);
     const isStraightening = useRef(false);
 
     const [displayState, setDisplayState] = useState({
-      base: finalPreviewUrl || selectedImage.thumbnailUrl,
+      base: finalPreviewUrl || cachedPreviewUrl || selectedImage.thumbnailUrl,
       fade: null as string | null,
     });
     const [isFadingIn, setIsFadingIn] = useState(false);
@@ -1302,7 +1763,7 @@ const ImageCanvas = memo(
     }, [interactivePatch]);
 
     useEffect(() => {
-      const newSrc = finalPreviewUrl || selectedImage.thumbnailUrl;
+      const newSrc = finalPreviewUrl || cachedPreviewUrl || selectedImage.thumbnailUrl;
       const isNewImage = prevImageIdentityRef.current !== selectedImage.thumbnailUrl;
 
       if (isNewImage) {
@@ -1312,39 +1773,14 @@ const ImageCanvas = memo(
         return;
       }
 
-      if (isSliderDragging) {
-        setDisplayState({ base: newSrc, fade: null });
-        setIsFadingIn(false);
-      } else {
-        if (displayState.base !== newSrc && displayState.base) {
-          setDisplayState((prev) => ({ base: prev.base, fade: newSrc }));
-          setIsFadingIn(false);
-
-          let frame1: number;
-          let frame2: number;
-
-          frame1 = requestAnimationFrame(() => {
-            frame2 = requestAnimationFrame(() => {
-              setIsFadingIn(true);
-            });
-          });
-
-          const timer = setTimeout(() => {
-            setDisplayState({ base: newSrc, fade: null });
-            setIsFadingIn(false);
-          }, 150);
-
-          return () => {
-            cancelAnimationFrame(frame1);
-            cancelAnimationFrame(frame2);
-            clearTimeout(timer);
-          };
-        } else {
-          setDisplayState({ base: newSrc, fade: null });
-          setIsFadingIn(false);
-        }
-      }
-    }, [finalPreviewUrl, selectedImage.thumbnailUrl, isSliderDragging]);
+      // BLITZRAW: a clean cut. There was a 150ms crossfade here, which was a
+      // reasonable way to cover a picture arriving late and became a smear the
+      // moment previews on disk made it arrive at once. The fade layer is left
+      // in place below and simply never asked for, so putting it back is one
+      // branch rather than a rewrite.
+      setDisplayState({ base: newSrc, fade: null });
+      setIsFadingIn(false);
+    }, [finalPreviewUrl, cachedPreviewUrl, selectedImage.thumbnailUrl, isSliderDragging]);
 
     useEffect(() => {
       setBaseTool(brushSettings?.tool ?? ToolType.Brush);
@@ -1524,7 +1960,16 @@ const ImageCanvas = memo(
       (isMasking || isAiEditing) && (activeSubMask?.type === Mask.Color || activeSubMask?.type === Mask.Luminance);
     const isInitialDrawing = (isMasking || isAiEditing) && activeSubMask?.parameters?.isInitialDraw === true;
 
-    const isToolActive = isBrushActive || isAiSubjectActive || isInitialDrawing || isParametricActive;
+    // ==================== BLITZRAW: the pen, while it is being placed ====================
+    // Only the placing half counts as a tool. Once the path is finished it goes
+    // back to being an ordinary shape whose anchors are dragged, and the photo
+    // under it goes back to panning; keeping the tool active would mean every
+    // click on the picture added a point to a path that was already done.
+    const isPenPlacing =
+      (isMasking || isAiEditing) && activeSubMask?.type === Mask.Pen && activeSubMask?.parameters?.isDrawing === true;
+
+    const isToolActive =
+      isBrushActive || isAiSubjectActive || isInitialDrawing || isParametricActive || isPenPlacing;
 
     useEffect(() => {
       if (maskOverlayUrl && (isMasking || isAiEditing)) {
@@ -1547,12 +1992,6 @@ const ImageCanvas = memo(
       previewBoxRef.current = null;
       setLocalInitialDrawParams(null);
     }, [isToolActive]);
-
-    useEffect(() => {
-      if (!isMasking && !isAiEditing) {
-        setIsMaskInteractionActive(false);
-      }
-    }, [isMasking, isAiEditing]);
 
     useEffect(() => {
       const clearTouchInteraction = () => {
@@ -1723,13 +2162,41 @@ const ImageCanvas = memo(
           const sumGM = linG + linM;
           const deltaTint = sumGM > 0.0001 ? ((linG - linM) / sumGM) * 400.0 : 0;
 
-          setAdjustments((prev: Adjustments) => ({
-            ...prev,
-            temperature: Math.max(-100, Math.min(100, deltaTemp)),
-            tint: Math.max(-100, Math.min(100, deltaTint)),
-          }));
-
-          onWbPicked();
+          // ============== BLITZRAW: pick a real white balance ==============
+          // The averaging above reads the preview, which has been through
+          // exposure and tone mapping, so its numbers say little about the
+          // light in the room. Ask the backend instead: it reads the as-shot
+          // render, recovers camera RGB and solves for the illuminant that
+          // calls that pixel neutral. The preview maths stays as the fallback
+          // for files with no calibration, such as JPEGs.
+          invoke<{ kelvin: number; tint: number }>('pick_white_balance', {
+            u: x / imgLogicalWidth,
+            v: y / imgLogicalHeight,
+            adjustments,
+          })
+            .then((picked) => {
+              setAdjustments((prev: Adjustments) => ({
+                ...prev,
+                whiteBalance: {
+                  // Snapped to the grid the slider moves on, so a picked value
+                  // and a dragged one are the same kind of number.
+                  kelvin: Math.round(picked.kelvin / KELVIN_STEP) * KELVIN_STEP,
+                  tint: Math.round(picked.tint),
+                },
+              }));
+            })
+            .catch(() => {
+              setAdjustments((prev: Adjustments) => ({
+                ...prev,
+                temperature: Math.max(-100, Math.min(100, deltaTemp)),
+                tint: Math.max(-100, Math.min(100, deltaTint)),
+              }));
+            })
+            .finally(() => {
+              onWbPicked();
+            });
+          return;
+          // ============ BLITZRAW END: pick a real white balance ============
         };
       },
       [
@@ -1738,6 +2205,7 @@ const ImageCanvas = memo(
         finalPreviewUrl,
         imageRenderSize,
         onWbPicked,
+        adjustments, // BLITZRAW: the pick maps through crop and rotation
         setAdjustments,
         getCanvasPointer,
       ],
@@ -1777,6 +2245,48 @@ const ImageCanvas = memo(
           updateSubMask(activeId, { parameters: newParams });
           return;
         }
+
+        // ============== BLITZRAW: a click places a pen anchor ==============
+        // Press, and a corner is placed. Press and drag, and the same press
+        // pulls handles out of it, so a corner and a curve are the same
+        // gesture told apart by whether the mouse moved. That is the pen tool
+        // everyone already knows from Illustrator, and it is the reason this
+        // has to live in the press rather than in a separate mode.
+        //
+        // Landing on the first anchor closes the path instead, which is the
+        // ordinary way a path ends.
+        if (isPenPlacing && activeSubMask) {
+          const stage = e.target.getStage();
+          const pos = getCanvasPointer(stage);
+          if (!pos) return;
+
+          const { scale } = imageRenderSize;
+          const x = pos.x / scale + cropX;
+          const y = pos.y / scale + cropY;
+
+          const activeId = isMasking ? activeMaskId : activeAiSubMaskId;
+          const points: Array<PenAnchor> = [...(activeSubMask.parameters?.points || [])];
+
+          if (closesPath(points, x, y, CLOSE_HIT_RADIUS / (scale * transformState.scale))) {
+            updateSubMask(activeId, {
+              parameters: { ...activeSubMask.parameters, points, closed: true, isDrawing: false },
+            });
+            setPenCursor(null);
+            penDrag.current = null;
+            return;
+          }
+
+          points.push({ x, y });
+          penDrag.current = { index: points.length - 1, start: { x, y } };
+          isDrawing.current = true;
+          drawingStageRef.current = stage;
+
+          updateSubMask(activeId, {
+            parameters: { ...activeSubMask.parameters, points, isDrawing: true },
+          });
+          return;
+        }
+        // ============ BLITZRAW END: a click places a pen anchor ============
 
         if (isInitialDrawing && activeSubMask) {
           isDrawing.current = true;
@@ -1850,7 +2360,6 @@ const ImageCanvas = memo(
             currentLine.current = null;
             setPreviewBox(null);
             previewBoxRef.current = null;
-            setIsMaskInteractionActive(false);
             return;
           }
 
@@ -1860,7 +2369,6 @@ const ImageCanvas = memo(
             const newBox = { start: pos, end: pos };
             previewBoxRef.current = newBox;
             setPreviewBox(newBox);
-            setIsMaskInteractionActive(true);
             return;
           }
 
@@ -1926,7 +2434,6 @@ const ImageCanvas = memo(
           drawingStageRef.current = stage;
 
           if (isManualCleanupActive) {
-            setIsMaskInteractionActive(true);
           }
 
           const newLine: DrawnLine = {
@@ -1976,9 +2483,63 @@ const ImageCanvas = memo(
       ],
     );
 
+    // ============ BLITZRAW: the eyedropper lets go of the photo ============
+    // Has the pointer been over the photo since the eyedropper was picked up?
+    //
+    // The tool is turned on by a button in a side panel, and the way from that
+    // button to the photo crosses the padding around it. Letting go the moment
+    // the pointer was not over the photo therefore put the tool down on the way
+    // to using it, every time, before it had ever been over the picture. So
+    // leaving only counts once there has been an arriving.
+    const wbPickerReachedImage = useRef(false);
+
+    useEffect(() => {
+      wbPickerReachedImage.current = false;
+    }, [isWbPickerActive]);
+
+    // Whether the pointer is over the picture itself, rather than over the
+    // stage, which is the picture plus half its width of padding on each side.
+    // The same bounds `handleWbClick` uses to decide a pick is valid, so being
+    // outside them already meant a click would do nothing.
+    const isPointerOverImage = useCallback(
+      (stage: any) => {
+        const pointerPos = getCanvasPointer(stage);
+        if (!pointerPos || !imageRenderSize.scale) {
+          return false;
+        }
+        const x = pointerPos.x / imageRenderSize.scale;
+        const y = pointerPos.y / imageRenderSize.scale;
+        const width = imageRenderSize.width / imageRenderSize.scale;
+        const height = imageRenderSize.height / imageRenderSize.scale;
+        return x >= 0 && x <= width && y >= 0 && y <= height;
+      },
+      [getCanvasPointer, imageRenderSize],
+    );
+    // ========== BLITZRAW END: the eyedropper lets go of the photo ==========
+
     const handleMove = useCallback(
       (e: any) => {
         if (isWbPickerActive) {
+          // BLITZRAW: leaving the photo puts the eyedropper down. Not the pick
+          // itself: finding a neutral takes several tries on different parts of
+          // the picture, and a one-shot tool would have to be picked up again
+          // between every one of them. Leaving is the moment somebody has
+          // finished, and it is also the moment they stop being able to see
+          // that the tool is still in their hand.
+          //
+          // Arriving has to come first. Without that, the walk from the button
+          // in the panel to the photo counts as a leaving and the tool is put
+          // down before it reaches the picture.
+          if (e && typeof e.target?.getStage === 'function') {
+            const stage = e.target.getStage();
+            if (stage) {
+              if (isPointerOverImage(stage)) {
+                wbPickerReachedImage.current = true;
+              } else if (wbPickerReachedImage.current) {
+                dismissWbPicker();
+              }
+            }
+          }
           return;
         }
 
@@ -2001,6 +2562,43 @@ const ImageCanvas = memo(
             setCursorPreview((p: CursorPreview) => ({ ...p, visible: false }));
           }
         }
+
+        // ======== BLITZRAW: the pen follows the cursor even when idle ========
+        // The rubber band from the last anchor has to track the mouse with no
+        // button down, so this runs before the drawing guard below. The guard
+        // exists for tools that only do something mid-stroke; the pen shows
+        // where the next segment would go before anything is committed.
+        if (isPenPlacing && pos) {
+          setPenCursor(pos);
+
+          if (penDrag.current && activeSubMask) {
+            const { scale } = imageRenderSize;
+            const x = pos.x / scale + cropX;
+            const y = pos.y / scale + cropY;
+            const { index, start } = penDrag.current;
+
+            // A press that has not really moved is a corner, so nothing is
+            // written until the drag is past the threshold. Without this every
+            // plain click would leave two handles sitting on top of its anchor
+            // and the next segment would be a curve nobody asked for.
+            if (Math.hypot(x - start.x, y - start.y) * scale * transformState.scale < HANDLE_DRAG_THRESHOLD) {
+              return;
+            }
+
+            const points: Array<PenAnchor> = [...(activeSubMask.parameters?.points || [])];
+            if (points[index]) {
+              points[index] = {
+                ...points[index],
+                handleOut: { x, y },
+                handleIn: mirrorHandle(points[index], { x, y }),
+              };
+              const activeId = isMasking ? activeMaskId : activeAiSubMaskId;
+              updateSubMask(activeId, { parameters: { ...activeSubMask.parameters, points } });
+            }
+          }
+          return;
+        }
+        // ====== BLITZRAW END: the pen follows the cursor even when idle ======
 
         if (!isDrawing.current || !isToolActive) {
           return;
@@ -2038,19 +2636,16 @@ const ImageCanvas = memo(
             updatedParams.radiusX = Math.max(1, Math.abs(x - dragStartPointer.current.x));
             updatedParams.radiusY = Math.max(1, Math.abs(y - dragStartPointer.current.y));
           } else if (activeSubMask.type === Mask.Linear) {
-            const dx = x - dragStartPointer.current.x;
-            const dy = y - dragStartPointer.current.y;
-            const R = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-
-            const px = -dy / R;
-            const py = dx / R;
-            const handleDist = Math.min(effectiveImageDimensions.width, effectiveImageDimensions.height) * 0.2;
-
-            updatedParams.startX = dragStartPointer.current.x + px * handleDist;
-            updatedParams.startY = dragStartPointer.current.y + py * handleDist;
-            updatedParams.endX = dragStartPointer.current.x - px * handleDist;
-            updatedParams.endY = dragStartPointer.current.y - py * handleDist;
-            updatedParams.range = R;
+            // BLITZRAW: a gradient begins where I press, and has faded to
+            // nothing where I let go. It used to put the press on the 50% mark,
+            // so the effect reached full strength a whole drag-length behind
+            // where I started. See utils/linearMask.ts.
+            const handleDist =
+              Math.min(effectiveImageDimensions.width, effectiveImageDimensions.height) * 0.2;
+            updatedParams = {
+              ...updatedParams,
+              ...linearFromDrag(dragStartPointer.current.x, dragStartPointer.current.y, x, y, handleDist),
+            };
           }
 
           setLocalInitialDrawParams(updatedParams);
@@ -2196,15 +2791,23 @@ const ImageCanvas = memo(
         brushImageSpaceSize,
         baseTool,
         getCanvasPointer,
+        isPointerOverImage,
       ],
     );
 
     const handleUp = useCallback(() => {
-      if (!isDrawing.current) {
+      // BLITZRAW: letting go ends the handle pull, not the path. The path is
+      // still being placed and the next press adds the next anchor, so this
+      // returns rather than falling through to the endings below.
+      if (isPenPlacing) {
+        penDrag.current = null;
+        isDrawing.current = false;
         return;
       }
 
-      setIsMaskInteractionActive(false);
+      if (!isDrawing.current) {
+        return;
+      }
 
       if (isInitialDrawing && activeSubMask) {
         isDrawing.current = false;
@@ -2372,6 +2975,13 @@ const ImageCanvas = memo(
 
     const handleMouseLeave = useCallback(() => {
       setCursorPreview((p: CursorPreview) => ({ ...p, visible: false }));
+      // BLITZRAW: a pointer moved off the photo fast enough can leave the whole
+      // stage without a single move event landing in the padding, and then
+      // nothing above would have noticed. Same rule: only once it has been
+      // over the photo, or crossing the padding on the way in would end it.
+      if (wbPickerReachedImage.current) {
+        dismissWbPicker();
+      }
     }, []);
 
     useEffect(() => {
@@ -2512,7 +3122,7 @@ const ImageCanvas = memo(
       };
     }, [originalSrc]);
 
-    const currentTarget = finalPreviewUrl || selectedImage.thumbnailUrl;
+    const currentTarget = finalPreviewUrl || cachedPreviewUrl || selectedImage.thumbnailUrl;
     const baseIsReady = displayState.base === currentTarget && !displayState.fade;
 
     const visiblePatch = interactivePatch ?? (baseIsReady ? null : retainedPatchRef.current);
@@ -2555,6 +3165,54 @@ const ImageCanvas = memo(
       return `rotate(${rotation}deg)`;
     }, [adjustments.rotation, liveRotation]);
 
+    // ============ BLITZRAW: rotate from the crop corners ============
+    // The same three steps the rotation slider takes, so the two controls are
+    // interchangeable: announce the drag, preview through `liveRotation`, then
+    // commit once at the end. Committing on every move would push a history
+    // step per frame and re-render the photo at full size each time.
+    const shownRotation =
+      liveRotation !== null && liveRotation !== undefined ? liveRotation : adjustments.rotation || 0;
+
+    const handleCornerRotateStart = useCallback(() => {
+      useEditorStore.getState().setEditor({ isRotationActive: true });
+    }, []);
+
+    const handleCornerRotate = useCallback((degrees: number) => {
+      useEditorStore.getState().setEditor({ liveRotation: degrees });
+    }, []);
+
+    const handleCornerRotateEnd = useCallback(
+      (degrees: number) => {
+        useEditorStore.getState().setEditor({ liveRotation: null, isRotationActive: false });
+        setAdjustments((prev: Adjustments) => ({ ...prev, rotation: degrees }));
+      },
+      [setAdjustments],
+    );
+    // ========== BLITZRAW END: rotate from the crop corners ==========
+
+    // ============ BLITZRAW: resize a locked crop from its edges ============
+    // react-image-crop hides its own edge handles as soon as an aspect ratio is
+    // set, leaving only corners. These put the edges back, resizing about the
+    // opposite edge and the centre of the other axis. See utils/cropSides.ts.
+    const handleSideResize = useCallback(
+      (next: { x: number; y: number; width: number; height: number }) => {
+        const percent: PercentCrop = { unit: '%', ...next };
+        // Through the same call react-image-crop makes, so every rule about
+        // what a crop may be applies to these the same as to the corners.
+        setCrop(percent as unknown as Crop, percent);
+      },
+      [setCrop],
+    );
+
+    const handleSideResizeEnd = useCallback(
+      (next: { x: number; y: number; width: number; height: number }) => {
+        const percent: PercentCrop = { unit: '%', ...next };
+        handleCropComplete?.(percent as unknown as Crop, percent);
+      },
+      [handleCropComplete],
+    );
+    // ========== BLITZRAW END: resize a locked crop from its edges ==========
+
     const getCropDimensions = () => {
       if (!crop || !uncroppedImageRenderSize?.width || !uncroppedImageRenderSize?.height) {
         return { width: 0, height: 0 };
@@ -2570,6 +3228,9 @@ const ImageCanvas = memo(
       if (isWbPickerActive) return 'crosshair';
       if (isParametricActive) return 'crosshair';
       if (isInitialDrawing) return 'crosshair';
+      // BLITZRAW: the pen places a point where the cross sits, so it wants the
+      // same cursor the other click-to-place tools have.
+      if (isPenPlacing) return 'crosshair';
 
       if (isBrushActive && !isManualCleanupActive) return 'none';
 
@@ -2615,9 +3276,49 @@ const ImageCanvas = memo(
       [activeContainer, onLiveMaskPreview],
     );
 
+    // ============ BLITZRAW: copying a sub-mask from the photo itself ============
+    // The masks panel has had Duplicate on its context menu for a long time,
+    // and it drops the copy exactly on top of the original, which then has to
+    // be found and dragged off it. Alt and drag does both at once, which is the
+    // gesture every drawing program already uses, and it happens where the eye
+    // already is rather than in a list on the right.
+    //
+    // It lands in the same container as the original, right after it, so the
+    // copy inherits the same adjustments and the same additive or subtractive
+    // sense. A copy in a container of its own would be a new mask rather than a
+    // second piece of this one.
+    const duplicateSubMaskOnCanvas = useCallback(
+      (source: SubMask) => {
+        const container = activeContainer;
+        if (!container) return;
+
+        const copy: SubMask = { ...JSON.parse(JSON.stringify(source)), id: crypto.randomUUID() };
+
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          masks: prev.masks.map((maskContainer: MaskContainer) => {
+            if (maskContainer.id !== container.id) return maskContainer;
+            const subMasks = [...maskContainer.subMasks];
+            const at = subMasks.findIndex((sm: SubMask) => sm.id === source.id);
+            subMasks.splice(at >= 0 ? at + 1 : subMasks.length, 0, copy);
+            return { ...maskContainer, subMasks };
+          }),
+        }));
+
+        // Selected, so the drag that follows the Alt press carries the copy and
+        // leaves the original where it was.
+        if (isMasking) {
+          onSelectMask(copy.id);
+        } else {
+          onSelectAiSubMask(copy.id);
+        }
+      },
+      [activeContainer, setAdjustments, isMasking, onSelectMask, onSelectAiSubMask],
+    );
+    // ========== BLITZRAW END: copying a sub-mask from the photo itself ==========
+
     const handleMaskInteractionStart = useCallback(
       (e?: any) => {
-        setIsMaskInteractionActive(true);
         const eventType = e?.evt?.type;
         if (eventType === 'touchstart') {
           setIsMaskTouchInteracting(true);
@@ -2627,21 +3328,27 @@ const ImageCanvas = memo(
     );
 
     const handleMaskInteractionEnd = useCallback(() => {
-      setIsMaskInteractionActive(false);
       setIsMaskTouchInteracting(false);
     }, [setIsMaskTouchInteracting]);
 
     const currentActiveSubMaskId = activeAiSubMaskId || activeMaskId;
-    const maskOpacity =
-      isShowingOriginal || isSliderDragging || isMaskInteractionActive
-        ? 0
-        : isCloneOrHealActive
-          ? hoveredMarkerId === currentActiveSubMaskId || isMaskControlHovered
-            ? 1
-            : 0
-          : isMaskControlHovered
-            ? 0
-            : 1;
+
+    // ============ BLITZRAW: whether the red is drawn ============
+    // Decided in Editor.tsx from the rule in utils/maskOverlay.ts, because it
+    // needs to know what the mask is set to and this component does not. What
+    // is left here is the one case that has never followed that rule: clone and
+    // heal, where the overlay is how you find the two ends of a patch, so it
+    // follows the marker under the pointer instead.
+    const maskOpacity = isShowingOriginal
+      ? 0
+      : isCloneOrHealActive
+        ? hoveredMarkerId === currentActiveSubMaskId || isMaskControlHovered
+          ? 1
+          : 0
+        : isMaskOverlayWanted
+          ? 1
+          : 0;
+    // ========== BLITZRAW END: whether the red is drawn ==========
 
     return (
       <div className="relative" style={{ width: '100%', height: '100%', cursor: effectiveCursor }}>
@@ -2917,6 +3624,11 @@ const ImageCanvas = memo(
                               offsetX={groupOffsetX}
                               offsetY={groupOffsetY}
                               stageScale={maxSafeScale}
+                              penCursor={renderSubMask.id === activeId ? penCursor : null}
+                              penActiveAnchor={
+                                renderSubMask.id === activeId ? (penDrag.current?.index ?? -1) : -1
+                              }
+                              onDuplicateSubMask={duplicateSubMaskOnCanvas}
                             />
                           );
                         })}
@@ -2991,13 +3703,40 @@ const ImageCanvas = memo(
                   const showDenseGrid = isRotationActive && !isStraightenActive;
                   const currentOverlayMode = isRotationActive || isStraightenActive ? 'none' : overlayMode || 'none';
                   return (
-                    <CompositionOverlays
-                      width={width}
-                      height={height}
-                      mode={currentOverlayMode}
-                      rotation={overlayRotation || 0}
-                      denseVisible={showDenseGrid}
-                    />
+                    <>
+                      <CompositionOverlays
+                        width={width}
+                        height={height}
+                        mode={currentOverlayMode}
+                        rotation={overlayRotation || 0}
+                        denseVisible={showDenseGrid}
+                      />
+                      {/* BLITZRAW: not while straightening, which is a
+                          different way of setting the same angle and puts its
+                          own line across the photo. Two ways of turning it at
+                          once is one too many. */}
+                      {!isStraightenActive && (
+                        <RotationHandles
+                          rotation={shownRotation}
+                          onRotateStart={handleCornerRotateStart}
+                          onRotate={handleCornerRotate}
+                          onRotateEnd={handleCornerRotateEnd}
+                        />
+                      )}
+                      {/* BLITZRAW: only with a ratio locked, which is exactly
+                          when react-image-crop takes its own edge handles
+                          away. With a free crop its handles are there and do
+                          the simpler thing already. */}
+                      {!isStraightenActive && crop && uncroppedImageRenderSize && (
+                        <SideHandles
+                          aspect={adjustments.aspectRatio}
+                          crop={crop as any}
+                          imageSize={uncroppedImageRenderSize}
+                          onResize={handleSideResize}
+                          onResizeEnd={handleSideResizeEnd}
+                        />
+                      )}
+                    </>
                   );
                 }}
               >

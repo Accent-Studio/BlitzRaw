@@ -4,11 +4,17 @@ import { Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
-import debounce from 'lodash.debounce';
+import { debouncedSetHistory } from '../../hooks/useEditorActions';
 
 import { ImageDimensions, RenderSize, useImageRenderSize } from '../../hooks/useImageRenderSize';
 import { Adjustments, AiPatch, MaskContainer } from '../../utils/adjustments';
-import { calculateCenteredCrop, rotateCropCenter } from '../../utils/cropUtils';
+import {
+  calculateCenteredCrop,
+  fitCropWithinRotation,
+  pixelCropFromPercent,
+  getOrientedDimensions,
+  rotateCropCenter,
+} from '../../utils/cropUtils';
 import EditorToolbar from './editor/EditorToolbar';
 import ImageCanvas from './editor/ImageCanvas';
 import { Mask, SubMask } from './right/Masks';
@@ -16,10 +22,13 @@ import { Panel, TransformState, Invokes } from '../ui/AppProperties';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useEditorStore } from '../../store/useEditorStore';
+import { maskHasAdjustments, shouldShowMaskOverlay } from '../../utils/maskOverlay';
 import { useSettingsStore } from '../../store/useSettingsStore';
-import { useUIStore } from '../../store/useUIStore';
+import { isPanelShowing, useUIStore } from '../../store/useUIStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useAiMasking } from '../../hooks/useAiMasking';
+import { CropParams, reconcileCropParams } from '../../utils/cropReconcile';
+import { useHistoryJump } from '../../hooks/useHistoryJump';
 
 const parseRgb = (rgbStr: string): [number, number, number, number] => {
   const match = rgbStr.match(/[\d.]+/g);
@@ -28,7 +37,6 @@ const parseRgb = (rgbStr: string): [number, number, number, number] => {
   }
   return [0, 0, 0, 1.0];
 };
-
 const checkCropValid = (pixelCrop: Partial<Crop>, imageW: number, imageH: number, rotation: number) => {
   if (pixelCrop.x === undefined || pixelCrop.y === undefined || !pixelCrop.width || !pixelCrop.height) {
     return false;
@@ -80,13 +88,13 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   const appSettings = useSettingsStore((s) => s.appSettings);
   const osPlatform = useSettingsStore((s) => s.osPlatform);
   const isFullScreen = useUIStore((s) => s.isFullScreen);
-  const activePanel = useUIStore((s) => s.activePanel);
   const isInstantTransition = useUIStore((s) => s.isInstantTransition);
   const setUI = useUIStore((s) => s.setUI);
   const isLoading = useLibraryStore((s) => s.isViewLoading);
   const selectedImage = useEditorStore((s) => s.selectedImage);
   const adjustments = useEditorStore((s) => s.adjustments);
   const adjustmentsHistory = useEditorStore((s) => s.history);
+  const adjustmentsHistoryLabels = useEditorStore((s) => s.historyLabels);
   const adjustmentsHistoryIndex = useEditorStore((s) => s.historyIndex);
   const finalPreviewUrl = useEditorStore((s) => s.finalPreviewUrl);
   const uncroppedAdjustedPreviewUrl = useEditorStore((s) => s.uncroppedAdjustedPreviewUrl);
@@ -102,42 +110,52 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   const isStraightenActive = useEditorStore((s) => s.isStraightenActive);
   const isWbPickerActive = useEditorStore((s) => s.isWbPickerActive);
   const liveRotation = useEditorStore((s) => s.liveRotation);
+  const cachedPreviewUrl = useEditorStore((s) => s.cachedPreviewUrl);
   const brushSettings = useEditorStore((s) => s.brushSettings);
   const activeMaskContainerId = useEditorStore((s) => s.activeMaskContainerId);
   const activeMaskId = useEditorStore((s) => s.activeMaskId);
   const activeAiPatchContainerId = useEditorStore((s) => s.activeAiPatchContainerId);
   const activeAiSubMaskId = useEditorStore((s) => s.activeAiSubMaskId);
   const isMaskControlHovered = useEditorStore((s) => s.isMaskControlHovered);
+  const hoveredMaskContainerId = useEditorStore((s) => s.hoveredMaskContainerId);
   const hasRenderedFirstFrame = useEditorStore((s) => s.hasRenderedFirstFrame);
 
   const setEditor = useEditorStore((s) => s.setEditor);
   const undo = useEditorStore((s) => s.undo);
   const redo = useEditorStore((s) => s.redo);
-  const goToHistoryIndex = useEditorStore((s) => s.goToHistoryIndex);
-  const pushHistory = useEditorStore((s) => s.pushHistory);
+  // BLITZRAW: the same jump the History panel uses, so the toolbar's step list
+  // and the panel mean the same thing. A click is a thing I did, so it goes into
+  // the list of what I did and Ctrl+Z takes the jump back.
+  const goToHistoryIndex = useHistoryJump();
   const canUndo = adjustmentsHistoryIndex > 0;
   const canRedo = adjustmentsHistoryIndex < adjustmentsHistory.length - 1;
 
   const isAndroid = osPlatform === 'android';
-
-  const debouncedSetHistory = useMemo(() => debounce((newAdj: Adjustments) => pushHistory(newAdj), 500), [pushHistory]);
 
   const setAdjustments = useCallback(
     (value: Partial<Adjustments> | ((prev: Adjustments) => Adjustments)) => {
       setEditor((state) => {
         const prevAdjustments = state.adjustments;
         const newAdjustments = typeof value === 'function' ? value(prevAdjustments) : { ...prevAdjustments, ...value };
-        debouncedSetHistory(newAdjustments);
+        // The shared rate limiter, not one of this component's own. Two timers
+        // on one value is how a run of nudges ends up split across two steps.
+        debouncedSetHistory(newAdjustments, state.selectedImage?.path ?? null);
         return { adjustments: newAdjustments };
       });
     },
-    [debouncedSetHistory, setEditor],
+    [setEditor],
   );
 
   const { handleGenerateAiMask, handleQuickErase, handleManualCleanup } = useAiMasking();
 
   const [crop, setCrop] = useState<Crop | null>(null);
-  const prevCropParams = useRef<any>(null);
+  // BLITZRAW: keyed to a photo. It used to be per mount and start empty, so the
+  // first run after mounting reported that everything had changed, including the
+  // frame's orientation, and a framing set by hand was replaced with the centred
+  // rectangle. See utils/cropReconcile.ts.
+  const prevCropParams = useRef<CropParams | null>(null);
+  // The rotation a crop was last fitted at with the crop panel shut, per image.
+  const looseRotationRef = useRef<{ path: string; rotation: number } | null>(null);
   const lastValidCropRef = useRef<PercentCrop | null>(null);
 
   const [isMaskHovered, setIsMaskHovered] = useState(false);
@@ -264,6 +282,12 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
     [setAdjustments],
   );
 
+  // BLITZRAW: a pick deliberately does not put the eyedropper down.
+  //
+  // Finding a neutral takes several tries on different parts of the picture,
+  // and a one-shot tool would have to be picked up again between every one of
+  // them. What ends it is leaving the photo, which is where somebody has
+  // actually finished. See utils/wbPicker.ts and ImageCanvas's handleMove.
   const handleWbPicked = useCallback(() => {}, []);
 
   useEffect(() => {
@@ -277,9 +301,13 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
     }
   }, [isFullScreen]);
 
-  const isCropping = activePanel === Panel.Crop;
-  const isMasking = activePanel === Panel.Masks;
-  const isAiEditing = activePanel === Panel.Ai;
+  // BLITZRAW: a tool is in use when its own panel is the one its sidebar is
+  // showing, not when it happens to be the last panel activated anywhere. The
+  // two sidebars change independently and sometimes in the same keystroke; see
+  // `isPanelShowing` in useUIStore for the keystroke that found this.
+  const isCropping = useUIStore((s) => isPanelShowing(s.activePanels, Panel.Crop));
+  const isMasking = useUIStore((s) => isPanelShowing(s.activePanels, Panel.Masks));
+  const isAiEditing = useUIStore((s) => isPanelShowing(s.activePanels, Panel.Ai));
 
   const croppedDimensions = useMemo<ImageDimensions | null>(() => {
     if (!selectedImage?.width || !selectedImage?.height) {
@@ -596,7 +624,25 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
     return null;
   }, [adjustments.masks, adjustments.aiPatches, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing]);
 
+  // ============ BLITZRAW: the pen needs the photo to hold still ============
+  // A click on the picture zooms it, which is right for looking and wrong for
+  // any tool whose own gesture is a click. Every such tool is listed below, and
+  // the pen is one.
+  //
+  // For as long as the pen mask is the selected one, not only while its path is
+  // being placed. `isMaskHovered` covers a cursor sitting on an anchor, but not
+  // the drag that follows it: the pointer leaves the anchor the moment it
+  // moves, hover goes off, and the rest of the drag panned the photo instead of
+  // carrying the point. Editing a path is the same kind of work as drawing one
+  // and wants the same still picture.
+  //
+  // The wheel and the middle button are untouched, so the frame can still be
+  // zoomed and moved around while a path is being worked on.
+  const isPenMaskActive = (isMasking || isAiEditing) && activeSubMask?.type === Mask.Pen;
+  // ========== BLITZRAW END: the pen needs the photo to hold still ==========
+
   const isPanningDisabled =
+    isPenMaskActive ||
     isMaskHovered ||
     isMaskTouchInteracting ||
     isCropping ||
@@ -1301,13 +1347,41 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
     };
   }, []);
 
-  const overlayTriggerHash = useMemo(() => {
-    let activeMaskDef = null;
-    if (activePanel === Panel.Masks && activeMaskContainerId) {
-      activeMaskDef = adjustments.masks?.find((c: MaskContainer) => c.id === activeMaskContainerId);
-    } else if (activePanel === Panel.Ai && activeAiPatchContainerId) {
-      activeMaskDef = adjustments.aiPatches?.find((p: AiPatch) => p.id === activeAiPatchContainerId);
+  // ======== BLITZRAW: the overlay is about the mask under the pointer ========
+  // Hovering a row in the list is how you ask "where is this one", so the
+  // overlay follows the pointer there and falls back to the selected mask. It
+  // used to only ever describe the selected one, which made hovering another
+  // row show the wrong shape.
+  const overlayMaskDef = useMemo(() => {
+    if (isMasking) {
+      const wanted = hoveredMaskContainerId ?? activeMaskContainerId;
+      if (wanted) {
+        return adjustments.masks?.find((c: MaskContainer) => c.id === wanted) ?? null;
+      }
+    } else if (isAiEditing && activeAiPatchContainerId) {
+      return adjustments.aiPatches?.find((p: AiPatch) => p.id === activeAiPatchContainerId) ?? null;
     }
+    return null;
+  }, [isMasking, isAiEditing, hoveredMaskContainerId, activeMaskContainerId, activeAiPatchContainerId, adjustments]);
+
+  /**
+   * Whether the red is drawn. The whole rule is in utils/maskOverlay.ts.
+   *
+   * A mask nobody has adjusted yet is only a shape, so it is always shown. Once
+   * it does something, the red is in the way of the thing it does, and comes
+   * back only while its own row is under the pointer.
+   */
+  const isMaskOverlayWanted = useMemo(() => {
+    if (!overlayMaskDef) return false;
+    return shouldShowMaskOverlay({
+      hasAdjustments: maskHasAdjustments((overlayMaskDef as any).adjustments),
+      isHoveredInList: hoveredMaskContainerId === (overlayMaskDef as any).id,
+    });
+  }, [overlayMaskDef, hoveredMaskContainerId]);
+  // ====== BLITZRAW END: the overlay is about the mask under the pointer ======
+
+  const overlayTriggerHash = useMemo(() => {
+    const activeMaskDef = overlayMaskDef;
 
     if (!activeMaskDef) return null;
 
@@ -1363,13 +1437,22 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
     return JSON.stringify({
       id: activeMaskDef.id,
       invert: activeMaskDef.invert,
+      // BLITZRAW: whether the mask is shown at all.
+      //
+      // `processOverlayQueue` already clears the overlay for a mask that is not
+      // visible, but it was never reached: turning the eye off changed nothing
+      // this hash could see, so the effect that asks for a new overlay did not
+      // run and the old red stayed on the photo. Hiding a mask is exactly the
+      // moment its overlay has to go.
+      visible: activeMaskDef.visible,
       ...('opacity' in activeMaskDef ? { opacity: activeMaskDef.opacity } : {}),
       subMasks,
       geometry,
       renderSize: { w: imageRenderSize.width, h: imageRenderSize.height },
     });
   }, [
-    activePanel,
+    isMasking,
+    isAiEditing,
     activeMaskContainerId,
     activeAiPatchContainerId,
     adjustments,
@@ -1378,37 +1461,17 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   ]);
 
   useEffect(() => {
-    let maskDefForOverlay = null;
-
-    if (activePanel === Panel.Masks && activeMaskContainerId) {
-      const activeMask = adjustments.masks?.find((c: MaskContainer) => c.id === activeMaskContainerId);
-      if (activeMask) {
-        maskDefForOverlay = {
-          ...activeMask,
-          adjustments: {},
-        };
-      }
-    } else if (activePanel === Panel.Ai && activeAiPatchContainerId) {
-      const activePatch = adjustments.aiPatches?.find((p: AiPatch) => p.id === activeAiPatchContainerId);
-      if (activePatch) {
-        maskDefForOverlay = {
-          ...activePatch,
-          adjustments: {},
-          opacity: 100,
-        };
-      }
-    }
+    // The same mask the hash above describes, or the two would disagree about
+    // which shape is on screen.
+    const maskDefForOverlay = overlayMaskDef
+      ? isAiEditing && !isMasking
+        ? { ...overlayMaskDef, adjustments: {}, opacity: 100 }
+        : { ...overlayMaskDef, adjustments: {} }
+      : null;
 
     requestMaskOverlay(maskDefForOverlay, imageRenderSize, adjustments);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    overlayTriggerHash,
-    requestMaskOverlay,
-    activePanel,
-    activeMaskContainerId,
-    activeAiPatchContainerId,
-    imageRenderSize,
-  ]);
+  }, [overlayTriggerHash, requestMaskOverlay, isMasking, isAiEditing, overlayMaskDef, imageRenderSize]);
 
   useEffect(() => {
     let timer: number;
@@ -1428,10 +1491,29 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
     const { aspectRatio, orientationSteps = 0, crop: currentAdjCrop, rotation = 0 } = adjustments;
     const effectiveRotation = liveRotation !== null && liveRotation !== undefined ? liveRotation : rotation;
 
-    const geometryChanged =
-      prevCropParams.current?.rotation !== rotation ||
-      prevCropParams.current?.aspectRatio !== aspectRatio ||
-      prevCropParams.current?.orientationSteps !== orientationSteps;
+    // ============ BLITZRAW: measured against THIS photo, not the last one ============
+    // A hand-set 16:9 framing became the centred rectangle and then reached two
+    // hundred photos, because this comparison read a note kept per mount rather
+    // than per photo. The note starts empty, so on the first run after mounting
+    // `undefined !== 0` for orientation, and the panel concluded the frame had
+    // been turned on its side. That is one of the two branches that recentres a
+    // crop outright rather than refitting it.
+    //
+    // The rule the sibling effect below already states: merely opening a photo
+    // cannot write a crop to it. See utils/cropReconcile.ts.
+    const reconciled = reconcileCropParams(prevCropParams.current, {
+      path: selectedImage.path,
+      rotation,
+      aspectRatio: aspectRatio ?? null,
+      orientationSteps,
+    });
+    // Remembered on sight, or the next real change would still have nothing of
+    // this photo's to compare against and a chosen ratio would not be refitted.
+    if (reconciled.firstSight) {
+      prevCropParams.current = reconciled.next;
+    }
+    const geometryChanged = reconciled.geometryChanged;
+    // ========== BLITZRAW END: measured against THIS photo, not the last one ==========
 
     const isDraggingRotation = liveRotation !== null && liveRotation !== undefined;
     const needsRecalc = currentAdjCrop === null || geometryChanged || isDraggingRotation;
@@ -1443,13 +1525,12 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
       const A = aspectRatio || W / H;
 
       let nextPixelCrop = currentAdjCrop;
-      const aspectChanged = prevCropParams.current?.aspectRatio !== aspectRatio;
-      const orientationChanged = prevCropParams.current?.orientationSteps !== orientationSteps;
-      const rotationChanged = prevCropParams.current?.rotation !== rotation || isDraggingRotation;
+      const { aspectChanged, orientationChanged } = reconciled;
+      const rotationChanged = reconciled.rotationChanged || isDraggingRotation;
 
       let isMaximized = false;
       if (currentAdjCrop) {
-        const referenceRotation = prevCropParams.current?.rotation ?? rotation;
+        const referenceRotation = reconciled.referenceRotation;
         const maxCropForReference = calculateCenteredCrop(
           selectedImage.width,
           selectedImage.height,
@@ -1521,60 +1602,24 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
           effectiveRotation,
         );
       } else {
-        const referenceRotation = prevCropParams.current?.rotation ?? rotation;
+        const referenceRotation = reconciled.referenceRotation;
         const rotationDelta = effectiveRotation - referenceRotation;
         const followedCrop =
           rotationChanged && rotationDelta !== 0
             ? rotateCropCenter(currentAdjCrop, W, H, rotationDelta)
             : currentAdjCrop;
 
-        if (checkCropValid(followedCrop, W, H, effectiveRotation)) {
-          nextPixelCrop = followedCrop;
-        } else {
-          let low = 0.1;
-          let high = 1.0;
-          let bestCrop = followedCrop;
-
-          for (let i = 0; i < 10; i++) {
-            let mid = (low + high) / 2;
-            let cx = followedCrop.x + followedCrop.width / 2;
-            let cy = followedCrop.y + followedCrop.height / 2;
-            let nw = followedCrop.width * mid;
-            let nh = followedCrop.height * mid;
-            let testCrop = {
-              unit: 'px' as const,
-              x: cx - nw / 2,
-              y: cy - nh / 2,
-              width: nw,
-              height: nh,
-            };
-
-            if (checkCropValid(testCrop, W, H, effectiveRotation)) {
-              bestCrop = testCrop;
-              low = mid;
-            } else {
-              high = mid;
-            }
-          }
-
-          if (low < 0.15) {
-            nextPixelCrop = calculateCenteredCrop(
-              selectedImage.width,
-              selectedImage.height,
-              orientationSteps,
-              A,
-              effectiveRotation,
-            );
-          } else {
-            nextPixelCrop = {
-              unit: 'px',
-              x: Math.ceil(bestCrop.x),
-              y: Math.ceil(bestCrop.y),
-              width: Math.floor(bestCrop.width),
-              height: Math.floor(bestCrop.height),
-            };
-          }
-        }
+        // Was written out here. Moved to cropUtils unchanged apart from the
+        // rounding, so the same fit is reachable when rotation moves without
+        // this panel being open.
+        nextPixelCrop = fitCropWithinRotation(
+          followedCrop,
+          selectedImage.width,
+          selectedImage.height,
+          orientationSteps,
+          A,
+          effectiveRotation,
+        );
       }
 
       if (isDraggingRotation) {
@@ -1590,7 +1635,33 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
           lastValidCropRef.current = pc;
         }
       } else {
-        prevCropParams.current = { rotation, aspectRatio, orientationSteps };
+        prevCropParams.current = reconciled.next;
+
+        // ============ BLITZRAW: a box to drag is not a crop to save ============
+        // A photo with no crop keeps its whole frame, so the panel offers the
+        // whole frame as a box. That used to be written into the photo, which
+        // dirtied its settings file and rebuilt its thumbnail for a photo that
+        // was only looked at, and worse, counted as an edit: with a selection
+        // live it went out to every photo in it. Six photos were cropped that
+        // way seconds before two hundred were.
+        //
+        // Shown, not saved. The drag itself writes it, through the same handler
+        // every other crop goes through, so nothing else changes.
+        const onlyBecauseThereIsNoCrop = !currentAdjCrop && !geometryChanged;
+
+        if (nextPixelCrop && onlyBecauseThereIsNoCrop) {
+          const pc: PercentCrop = {
+            unit: '%',
+            x: (nextPixelCrop.x / W) * 100,
+            y: (nextPixelCrop.y / H) * 100,
+            width: (nextPixelCrop.width / W) * 100,
+            height: (nextPixelCrop.height / H) * 100,
+          };
+          setCrop(pc);
+          lastValidCropRef.current = pc;
+          return;
+        }
+        // ========== BLITZRAW END: a box to drag is not a crop to save ==========
 
         if (
           nextPixelCrop &&
@@ -1612,6 +1683,97 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
     liveRotation,
     isCropping,
     selectedImage,
+    setAdjustments,
+  ]);
+
+  // The same job for straightening that happens with the crop panel shut.
+  //
+  // Everything above is behind `isCropping`, and rotation does not need the
+  // panel to move: the rotation quick adjustment nudges it from the editor with
+  // any panel showing and from the grid, and pasting Transform without Crop
+  // sets it too. Rotation fills the corners of a canvas that never changes
+  // size, so a crop left where it was reaches straight into them.
+  //
+  // Deliberately not a second constrain. It decides nothing itself: it applies
+  // the two rules the panel applies to a rotation change, and hands the panel's
+  // own routine the arithmetic. Nothing happens while the crop is both valid
+  // and not at the maximum, so merely opening a photo cannot write a crop to it.
+  useEffect(() => {
+    if (isCropping || !selectedImage?.path || !selectedImage?.width || !selectedImage?.height) {
+      return;
+    }
+    const { rotation = 0, aspectRatio = null, orientationSteps = 0, crop } = adjustments;
+    const { width: W, height: H } = getOrientedDimensions(selectedImage.width, selectedImage.height, orientationSteps);
+    const A = aspectRatio || W / H;
+
+    // The rotation this crop was last fitted at. Kept per image, because a
+    // reference left over from the previous photo would be answering the
+    // maximised question about a crop it knows nothing about.
+    const previous =
+      looseRotationRef.current?.path === selectedImage.path ? looseRotationRef.current.rotation : rotation;
+    looseRotationRef.current = { path: selectedImage.path, rotation };
+
+    // No crop means the whole frame is kept, corners included, so that is what
+    // has to be judged rather than treated as nothing to do. It is also the
+    // maximum for a level photo, which is what lets the first press out of zero
+    // land on the exact maximum rather than a fitted approximation of it.
+    const current = crop ?? { unit: 'px' as const, x: 0, y: 0, width: W, height: H };
+    const maxForReference = calculateCenteredCrop(
+      selectedImage.width,
+      selectedImage.height,
+      orientationSteps,
+      A,
+      previous,
+    );
+    const isMaximized =
+      !!maxForReference &&
+      Math.abs(current.x - maxForReference.x) <= 2 &&
+      Math.abs(current.y - maxForReference.y) <= 2 &&
+      Math.abs(current.width - maxForReference.width) <= 2 &&
+      Math.abs(current.height - maxForReference.height) <= 2;
+
+    let next: Crop | null = null;
+    if (isMaximized && previous !== rotation) {
+      // A crop sitting at the maximum follows the rotation in both directions,
+      // so straightening back towards level reclaims the frame it gave up.
+      // Without this it only ever shrank, and returning to zero left the photo
+      // cropped for a rotation it no longer has.
+      next = calculateCenteredCrop(selectedImage.width, selectedImage.height, orientationSteps, A, rotation);
+    } else if (rotation && !checkCropValid(current, W, H, rotation)) {
+      // A crop the user sized by hand is left where it is while it still fits,
+      // the same as in the panel, and only shrunk once it does not.
+      next = fitCropWithinRotation(
+        current,
+        selectedImage.width,
+        selectedImage.height,
+        orientationSteps,
+        A,
+        rotation,
+      );
+    }
+
+    // If the answer came back no better, leave it alone rather than writing the
+    // same crop back and being called again by the write.
+    if (!next || !checkCropValid(next, W, H, rotation)) {
+      return;
+    }
+    if (
+      crop &&
+      Math.abs(crop.x - next.x) <= 1 &&
+      Math.abs(crop.y - next.y) <= 1 &&
+      Math.abs(crop.width - next.width) <= 1 &&
+      Math.abs(crop.height - next.height) <= 1
+    ) {
+      return;
+    }
+    setAdjustments((prev: Adjustments) => ({ ...prev, crop: next }));
+  }, [
+    isCropping,
+    selectedImage,
+    adjustments.rotation,
+    adjustments.crop,
+    adjustments.aspectRatio,
+    adjustments.orientationSteps,
     setAdjustments,
   ]);
 
@@ -1929,13 +2091,10 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
       const baseW = isSwapped ? selectedImage.height : selectedImage.width;
       const baseH = isSwapped ? selectedImage.width : selectedImage.height;
 
-      const newPixelCrop: Crop = {
-        unit: 'px',
-        x: Math.ceil((pc.x / 100) * baseW),
-        y: Math.ceil((pc.y / 100) * baseH),
-        width: Math.floor((pc.width / 100) * baseW),
-        height: Math.floor((pc.height / 100) * baseH),
-      };
+      // BLITZRAW: the trip back from the box on screen has to land exactly
+      // where it started, or opening the Crop panel edits the photo. See
+      // utils/cropUtils.ts.
+      const newPixelCrop: Crop = pixelCropFromPercent(pc, baseW, baseH);
 
       setAdjustments((prev: Adjustments) => {
         if (JSON.stringify(newPixelCrop) !== JSON.stringify(prev.crop)) {
@@ -2005,6 +2164,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
           showDateView={showExifDateView}
           onToggleDateView={() => setShowExifDateView((prev) => !prev)}
           adjustmentsHistory={adjustmentsHistory}
+          adjustmentsHistoryLabels={adjustmentsHistoryLabels}
           adjustmentsHistoryIndex={adjustmentsHistoryIndex}
           goToAdjustmentsHistoryIndex={goToHistoryIndex}
         />
@@ -2060,6 +2220,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
             isAiEditing={isAiEditing}
             isCropping={isCropping}
             isMaskControlHovered={isMaskControlHovered}
+            isMaskOverlayWanted={isMaskOverlayWanted}
             isMasking={isMasking}
             isStraightenActive={isStraightenActive}
             isRotationActive={isRotationActive}
@@ -2090,6 +2251,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
             cursorStyle={cursorStyle}
             isMaxZoom={isMaxZoom}
             liveRotation={liveRotation}
+            cachedPreviewUrl={cachedPreviewUrl}
             transformState={transformState}
             hasRenderedFirstFrame={hasRenderedFirstFrame}
           />

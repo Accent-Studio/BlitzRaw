@@ -24,7 +24,8 @@ import Slider from '../../ui/Slider';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useEditorStore } from '../../../store/useEditorStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
-import { calculateAreaPreservingCrop, calculateCenteredCrop } from '../../../utils/cropUtils';
+import { calculateAreaPreservingCrop, calculateCenteredCrop,
+} from '../../../utils/cropUtils';
 import { Crop } from 'react-image-crop';
 
 const BASE_RATIO = 1.618;
@@ -50,6 +51,8 @@ export default function CropPanel() {
   const selectedImage = useEditorStore((s) => s.selectedImage);
   const adjustments = useEditorStore((s) => s.adjustments);
   const isStraightenActive = useEditorStore((s) => s.isStraightenActive);
+  // BLITZRAW: set by the crop corner grips. See RotationHandles.tsx.
+  const storeLiveRotation = useEditorStore((s) => s.liveRotation);
   const activeOverlay = useEditorStore((s) => s.overlayMode);
   const setEditor = useEditorStore((s) => s.setEditor);
   const { setAdjustments } = useEditorActions();
@@ -399,7 +402,13 @@ export default function CropPanel() {
     return rotation || 0;
   }, [rotation]);
 
-  const displayRotation = localRotation !== null ? localRotation : fineRotation;
+  // BLITZRAW: the corner grips write straight to the store's `liveRotation`,
+  // which this panel's own local copy knows nothing about. Without the middle
+  // term the slider sat still through a corner drag and jumped at the end,
+  // which reads as the two controls disagreeing. Local first, because while
+  // this panel is the one dragging it is the one with the freshest number.
+  const displayRotation =
+    localRotation !== null ? localRotation : (storeLiveRotation ?? fineRotation);
 
   const handleFineRotationChange = (e: any) => {
     const newFineRotation = parseFloat(e.target.value);
@@ -636,6 +645,7 @@ export default function CropPanel() {
                   min={-45}
                   max={45}
                   step={0.1}
+                  adjustmentKey="rotation"
                   value={displayRotation}
                   defaultValue={0}
                   suffix="°"
@@ -773,10 +783,16 @@ export default function CropPanel() {
         isOpen={isLensModalOpen}
         onClose={() => setIsLensModalOpen(false)}
         onApply={(newParams) => {
-          setAdjustments((prev: Adjustments) => ({
-            ...prev,
-            ...newParams,
-          }));
+          // BLITZRAW: named, because a lens correction moves half a dozen
+          // things at once and reading it as "Lens Maker, Lens Model..." says
+          // nothing about what happened. See utils/actionId.ts.
+          setAdjustments(
+            (prev: Adjustments) => ({
+              ...prev,
+              ...newParams,
+            }),
+            'Lens correction',
+          );
         }}
         currentAdjustments={adjustments}
         selectedImage={selectedImage}

@@ -7,6 +7,7 @@ import {
   Droplets,
   Eraser,
   MoreHorizontal,
+  PenTool,
   RectangleHorizontal,
   Sparkles,
   TriangleRight,
@@ -28,6 +29,8 @@ export enum Mask {
   Color = 'color',
   Linear = 'linear',
   Luminance = 'luminance',
+  // BLITZRAW: a drawn path, straight or curved. See `pen_mask.rs`.
+  Pen = 'pen',
   QuickEraser = 'quick-eraser',
   Radial = 'radial',
   Clone = 'clone',
@@ -79,6 +82,7 @@ export function formatMaskTypeName(type: string) {
   if (type === Mask.Color) return i18n.t('masks.types.color');
   if (type === Mask.Linear) return i18n.t('masks.types.linear');
   if (type === Mask.Luminance) return i18n.t('masks.types.luminance');
+  if (type === Mask.Pen) return i18n.t('masks.types.pen');
   if (type === Mask.Radial) return i18n.t('masks.types.radial');
   if (type === Mask.Clone) return i18n.t('masks.types.clone');
   if (type === Mask.Heal) return i18n.t('masks.types.heal');
@@ -108,6 +112,7 @@ export const MASK_ICON_MAP: Record<Mask, any> = {
   [Mask.Color]: Droplet,
   [Mask.Linear]: TriangleRight,
   [Mask.Luminance]: Sparkles,
+  [Mask.Pen]: PenTool,
   [Mask.QuickEraser]: Eraser,
   [Mask.Radial]: Circle,
   [Mask.Clone]: Stamp,
@@ -272,6 +277,12 @@ export const OTHERS_MASK_TYPES: Array<MaskType> = [
     icon: Brush,
     name: 'Brush',
     type: Mask.Brush,
+  },
+  {
+    disabled: false,
+    icon: PenTool,
+    name: 'Pen',
+    type: Mask.Pen,
   },
   {
     disabled: false,

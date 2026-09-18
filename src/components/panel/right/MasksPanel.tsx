@@ -48,10 +48,9 @@ import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
 import BasicAdjustments from '../../adjustments/Basic';
 import CurveGraph from '../../adjustments/Curves';
-import ColorPanel from '../../adjustments/Color';
+import ColorPanel, { ColorCorrectionPanel, ColorMixerPanel } from '../../adjustments/Color';
 import DetailsPanel from '../../adjustments/Details';
 import EffectsPanel from '../../adjustments/Effects';
-import Waveform from '../editor/Waveform';
 import Resizer from '../../ui/Resizer';
 import { DepthRangePicker } from '../../ui/DepthRangePicker';
 
@@ -74,6 +73,7 @@ import {
   INITIAL_MASK_CONTAINER,
   MaskContainer,
   ADJUSTMENT_SECTIONS,
+  SECTION_TITLE_KEYS,
 } from '../../../utils/adjustments';
 import { useContextMenu } from '../../../context/ContextMenuContext';
 import { OPTION_SEPARATOR, Orientation, Panel } from '../../ui/AppProperties';
@@ -87,7 +87,6 @@ import { useProcessStore } from '../../../store/useProcessStore';
 import { useAiMasking } from '../../../hooks/useAiMasking';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 import { useUIStore } from '../../../store/useUIStore';
-import { useWaveformControls } from '../../../hooks/useWaveformControls';
 
 interface DragData {
   type: 'Container' | 'SubMask' | 'Creation';
@@ -101,6 +100,12 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
     parameters: [{ key: 'feather', min: 0, max: 100, step: 1, multiplier: 100, defaultValue: 50 }],
   },
   [Mask.Brush]: { showBrushTools: true },
+  [Mask.Pen]: {
+    parameters: [
+      { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
+      { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 0 },
+    ],
+  },
   [Mask.Flow]: { showBrushTools: true, showFlowControl: true },
   [Mask.Linear]: { parameters: [] },
   [Mask.Color]: {
@@ -289,10 +294,7 @@ export default function MasksPanel() {
     histogram,
     isGeneratingAiMask,
     selectedImage,
-    isWaveformVisible,
     waveform,
-    activeWaveformChannel,
-    waveformHeight,
     setEditor,
   } = useEditorStore(
     useShallow((state) => ({
@@ -304,16 +306,11 @@ export default function MasksPanel() {
       histogram: state.histogram,
       isGeneratingAiMask: state.isGeneratingAiMask,
       selectedImage: state.selectedImage,
-      isWaveformVisible: state.isWaveformVisible,
       waveform: state.waveform,
-      activeWaveformChannel: state.activeWaveformChannel,
-      waveformHeight: state.waveformHeight,
       setEditor: state.setEditor,
     })),
   );
 
-  const { isResizingWaveform, onToggleWaveform, setActiveWaveformChannel, setWaveformHeight, handleWaveformResize } =
-    useWaveformControls();
 
   const setBrushSettings = useCallback(
     (updater: any) => {
@@ -983,25 +980,6 @@ export default function MasksPanel() {
           <Text variant={TextVariants.title}>{t('editor.masks.maskingTitle')}</Text>
           <div className="flex items-center gap-1">
             <button
-              className={clsx(
-                'p-2 rounded-full transition-colors',
-                isAdjustmentsPanelVisible
-                  ? 'opacity-50 cursor-not-allowed text-text-secondary'
-                  : isWaveformVisible
-                    ? 'bg-surface hover:bg-card-active'
-                    : 'hover:bg-surface',
-              )}
-              onClick={onToggleWaveform}
-              disabled={isAdjustmentsPanelVisible}
-              data-tooltip={
-                isAdjustmentsPanelVisible
-                  ? t('editor.masks.toggleAnalyticsInAdjustments')
-                  : t('editor.masks.toggleAnalyticsTooltip')
-              }
-            >
-              <ChartArea size={18} />
-            </button>
-            <button
               className="p-2 rounded-full hover:bg-surface transition-colors"
               onClick={handleResetAllMasks}
               data-tooltip={t('editor.masks.resetMaskingTooltip')}
@@ -1011,34 +989,8 @@ export default function MasksPanel() {
           </div>
         </div>
 
-        <AnimatePresence initial={false}>
-          {isWaveformVisible && !isAdjustmentsPanelVisible && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: waveformHeight || 256, opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: isResizingWaveform ? 0 : 0.2, ease: 'easeOut' }}
-              className="shrink-0 flex flex-col relative border-b border-surface overflow-hidden"
-            >
-              <div className="grow w-full h-full p-3 pb-2 min-h-0">
-                <Waveform
-                  waveformData={waveform || null}
-                  histogram={histogram}
-                  displayMode={activeWaveformChannel || 'luma'}
-                  setDisplayMode={setActiveWaveformChannel}
-                  showClipping={adjustments.showClipping || false}
-                  onToggleClipping={() => {
-                    setAdjustments((prev: Adjustments) => ({
-                      ...prev,
-                      showClipping: !prev.showClipping,
-                    }));
-                  }}
-                />
-              </div>
-              <Resizer direction={Orientation.Horizontal} onMouseDown={handleWaveformResize} />
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* The scopes are their own panel now, so this copy, which existed only
+            for when the Adjustments panel was not the one showing, is gone. */}
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col min-h-0 p-3">
           {selectedImage ? (
@@ -1501,6 +1453,20 @@ function ContainerRow({
         onClick={(e) => {
           e.stopPropagation();
           onSelect();
+        }}
+        onMouseEnter={() => {
+          // BLITZRAW: resting on a mask's row is what shows where that mask is,
+          // once it has adjustments and the red is otherwise out of the way.
+          // See utils/maskOverlay.ts for the whole rule.
+          useEditorStore.getState().setEditor({ hoveredMaskContainerId: container.id });
+        }}
+        onMouseLeave={() => {
+          // Only if it is still this row. Moving from one row straight to the
+          // next fires this after the other's mouseenter, and clearing blindly
+          // would put the red out again the moment it arrived.
+          useEditorStore.setState((state) =>
+            state.hoveredMaskContainerId === container.id ? { hoveredMaskContainerId: null } : state,
+          );
         }}
         onContextMenu={onContextMenu}
       >
@@ -2252,12 +2218,19 @@ function SettingsPanel({
         {Object.keys(ADJUSTMENT_SECTIONS).map((sectionName) => {
           const SectionComponent: any = {
             basic: BasicAdjustments,
+            // BLITZRAW: colour is three sections now. A mask gets the same
+            // three, so what it can do stays the same as what the photo can do.
+            colorCorrection: ColorCorrectionPanel,
             curves: CurveGraph,
+            colorMixer: ColorMixerPanel,
             color: ColorPanel,
             details: DetailsPanel,
             effects: EffectsPanel,
           }[sectionName];
-          const title = sectionName.charAt(0).toUpperCase() + sectionName.slice(1);
+          // BLITZRAW: named the same way the editor names them, rather than by
+          // capitalising the key, which turned `colorCorrection` into
+          // "ColorCorrection".
+          const title = t(SECTION_TITLE_KEYS[sectionName as keyof typeof SECTION_TITLE_KEYS]);
           return (
             <CollapsibleSection
               key={sectionName}

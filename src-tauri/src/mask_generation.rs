@@ -1269,6 +1269,23 @@ fn generate_sub_mask_bitmap(
             scale,
             crop_offset,
         )),
+        // ================= BLITZRAW: the pen mask =================
+        // The fill lives in `pen_mask`, which knows nothing about grow or
+        // feather; those are applied here with the one helper every other
+        // type already shares, so a pen edge softens by the same rule as a
+        // radial one and the two read alike at the same setting.
+        "pen" => {
+            let (mut bitmap, grow, feather) = crate::pen_mask::generate_pen_bitmap(
+                &sub_mask.parameters,
+                width,
+                height,
+                scale,
+                crop_offset,
+            );
+            apply_grow_and_feather(&mut bitmap, grow, feather, width, height);
+            Some(bitmap)
+        }
+        // =============== BLITZRAW END: the pen mask ===============
         "brush" | "clone" | "heal" => Some(generate_brush_bitmap(
             &sub_mask.parameters,
             width,

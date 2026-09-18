@@ -1,4 +1,5 @@
 import { type RefObject, type PointerEvent as ReactPointerEvent } from 'react';
+import { StackInfo } from '../../utils/imageStacking';
 import { useShallow } from 'zustand/react/shallow';
 import clsx from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -24,6 +25,7 @@ interface EditorViewProps {
   compactEditorPanelCollapsedHeight: number;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   sortedImageList: ImageFile[];
+  stackInfo?: Map<string, StackInfo>;
   createResizeHandler: (stateKey: string, startSize: number) => (e: ReactPointerEvent<HTMLDivElement>) => void;
   handleBackToLibrary: () => void;
   handleEditorContextMenu: (...args: any) => void;
@@ -49,6 +51,7 @@ export default function EditorView({
   compactEditorPanelCollapsedHeight,
   thumbnailAspectRatio,
   sortedImageList,
+  stackInfo,
   createResizeHandler,
   handleBackToLibrary,
   handleEditorContextMenu,
@@ -81,11 +84,15 @@ export default function EditorView({
     })),
   );
 
-  const { multiSelectedPaths, imageRatings, isViewLoading } = useLibraryStore(
+  const { multiSelectedPaths, imageRatings, isViewLoading, folderImageCount } = useLibraryStore(
     useShallow((state) => ({
       multiSelectedPaths: state.multiSelectedPaths,
       imageRatings: state.imageRatings,
       isViewLoading: state.isViewLoading,
+      // BLITZRAW: the folder, not the filtered view. The bottom bar reports
+      // both, and it used to be handed the filtered count twice, so a filter
+      // hiding 900 frames still read as 'of 100'.
+      folderImageCount: state.imageList.length,
     })),
   );
 
@@ -109,6 +116,7 @@ export default function EditorView({
     <BottomBar
       filmstripHeight={bottomPanelHeight}
       imageList={sortedImageList}
+      stackInfo={stackInfo}
       imageRatings={imageRatings}
       isAndroid={isAndroid}
       isCopied={isCopied}
@@ -138,7 +146,8 @@ export default function EditorView({
       showFilmstrip={!isCompactPortrait}
       showZoomControls={!isAndroid}
       thumbnailAspectRatio={thumbnailAspectRatio}
-      totalImages={sortedImageList.length}
+      totalImages={folderImageCount}
+      visibleImages={sortedImageList.length}
     />
   );
 

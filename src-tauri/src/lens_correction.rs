@@ -490,7 +490,27 @@ impl Lens {
 
 fn extract_dist_params(dist: &Distortion) -> (f64, f64, f64, u32) {
     match dist.model.as_str() {
-        "poly3" | "poly5" => (
+        // ============ BLITZRAW: poly3 is not poly5 ============
+        // The database holds three distortion models and they are three
+        // different sums. These two were being treated as one, so every lens
+        // measured with poly3 was corrected with the poly5 sum instead.
+        //
+        //   poly5   Rd = Ru * (1 + k1 Ru^2 + k2 Ru^4)
+        //   poly3   Rd = Ru * (1 - k1 + k1 Ru^2)
+        //   ptlens  Rd = Ru * (a Ru^3 + b Ru^2 + c Ru + 1 - a - b - c)
+        //
+        // The `1 - k1` is what was lost, and losing it matters twice over. It
+        // changes the shape of the correction across the frame, and it breaks
+        // the one property every model here shares: at the corner, where Ru is
+        // 1, all three come to exactly 1, so a corrected picture keeps its
+        // corners. poly3 without that term pulls them in.
+        //
+        // poly3 needs no new arithmetic. It is ptlens with a and c at zero:
+        // put k1 in b and the existing sum comes out as `Ru * (k1 Ru^2 + 1 - k1)`,
+        // which is poly3 exactly.
+        "poly3" => (0.0, dist.k1.unwrap_or(0.0) as f64, 0.0, 1),
+        // ========== BLITZRAW END: poly3 is not poly5 ==========
+        "poly5" => (
             dist.k1.unwrap_or(0.0) as f64,
             dist.k2.unwrap_or(0.0) as f64,
             dist.k3.unwrap_or(0.0) as f64,
@@ -783,3 +803,165 @@ pub fn resolve_lens_params(
         None
     }
 }
+
+// ===================== BLITZRAW: what the profile really says =====================
+#[cfg(test)]
+mod blitzraw_distortion_tests {
+    use super::*;
+
+    fn dist(model: &str, focal: f32, k1: Option<f32>, a: Option<f32>, b: Option<f32>, c: Option<f32>) -> Distortion {
+        Distortion {
+            model: model.to_string(),
+            focal,
+            real_focal: None,
+            k1,
+            k2: None,
+            k3: None,
+            a,
+            b,
+            c,
+        }
+    }
+
+    /// What the shader does with the numbers this file hands it.
+    ///
+    /// Kept here rather than reached for, because the point of these checks is
+    /// the numbers, and having the sum written twice would let the two drift.
+    fn radius_out(params: (f64, f64, f64, u32), ru: f64) -> f64 {
+        let (p1, p2, p3, model) = params;
+        let ru2 = ru * ru;
+        if model == 1 {
+            let d = 1.0 - p1 - p2 - p3;
+            ru * (p1 * ru2 * ru + p2 * ru2 + p3 * ru + d)
+        } else {
+            ru * (1.0 + p1 * ru2 + p2 * ru2 * ru2 + p3 * ru2 * ru2 * ru2)
+        }
+    }
+
+    #[test]
+    fn every_model_keeps_the_corners_where_they_are() {
+        // The property all three share, and the one that says whether a model
+        // has been read correctly. At the corner the radius comes to exactly
+        // itself, so a corrected picture is still the same picture, framed the
+        // same way. poly3 read as poly5 does not do this, which is how the
+        // fault was found.
+        let ptlens = extract_dist_params(&dist(
+            "ptlens", 24.0, None, Some(0.03963), Some(-0.12592), Some(0.08209),
+        ));
+        let poly3 = extract_dist_params(&dist("poly3", 70.0, Some(-0.00849), None, None, None));
+
+        assert!((radius_out(ptlens, 1.0) - 1.0).abs() < 1e-9, "ptlens");
+        assert!((radius_out(poly3, 1.0) - 1.0).abs() < 1e-9, "poly3");
+    }
+
+    #[test]
+    fn poly3_is_read_as_poly3_and_not_as_poly5() {
+        // The real 70-200 f/4 at 70mm, from slr-nikon.xml.
+        let k1 = -0.00849_f64;
+        let params = extract_dist_params(&dist("poly3", 70.0, Some(k1 as f32), None, None, None));
+
+        for ru in [0.25_f64, 0.5, 0.75, 1.0] {
+            let want = ru * (1.0 - k1 + k1 * ru * ru);
+            assert!(
+                (radius_out(params, ru) - want).abs() < 1e-9,
+                "at {ru} the sum should be poly3"
+            );
+            let poly5_would_be = ru * (1.0 + k1 * ru * ru);
+            if ru < 0.999 {
+                assert!(
+                    (want - poly5_would_be).abs() > 1e-6,
+                    "and the two really are different sums, or this check proves nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn poly5_still_uses_its_own_sum() {
+        let params = extract_dist_params(&Distortion {
+            model: "poly5".to_string(),
+            focal: 20.0,
+            real_focal: None,
+            k1: Some(0.01),
+            k2: Some(-0.002),
+            k3: None,
+            a: None,
+            b: None,
+            c: None,
+        });
+        assert_eq!(params.3, 0, "poly5 is not ptlens");
+        let ru = 0.5_f64;
+        let want = ru * (1.0 + 0.01 * ru * ru - 0.002 * ru.powi(4));
+        assert!((radius_out(params, ru) - want).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_real_ultra_wide_is_corrected_hardest_at_the_corners() {
+        // The check that says whether the radius has been divided by the right
+        // length. The profile is a polynomial in r/unit, and the unit is half
+        // the SHORT side, so on a 3:2 frame the corner sits at r = 1.803.
+        //
+        // Divide by half the diagonal instead and the corner lands at r = 1,
+        // where every model in this database comes to exactly 1, so the corners
+        // get no correction at all. On a 14mm that is plainly wrong: an
+        // ultra-wide's barrel is worst in the corners, not in the middle.
+        let params = extract_dist_params(&dist(
+            "ptlens", 14.0, None, Some(0.0076), Some(-0.0551), Some(0.0113),
+        ));
+        let corner = 1.8027_f64; // half diagonal over half short side, 3:2
+
+        let at_corner = radius_out(params, corner) / corner - 1.0;
+        let at_middle = radius_out(params, corner * 0.3) / (corner * 0.3) - 1.0;
+
+        assert!(
+            at_corner < -0.05,
+            "the corners should be pulled in hard, got {at_corner}"
+        );
+        assert!(
+            at_middle > 0.0,
+            "and the middle pushed out a little, got {at_middle}"
+        );
+        assert!(
+            at_corner.abs() > at_middle.abs(),
+            "the corners are where an ultra-wide bends most"
+        );
+
+        // What the wrong length gave: nothing at the corner, most in the middle.
+        let wrong_corner = radius_out(params, 1.0) / 1.0 - 1.0;
+        assert!(
+            wrong_corner.abs() < 1e-9,
+            "dividing by half the diagonal left the corners untouched, which is the fault"
+        );
+    }
+
+    #[test]
+    fn a_model_nobody_has_heard_of_corrects_nothing() {
+        // Better a picture left alone than one bent by numbers meant for
+        // another sum.
+        let params = extract_dist_params(&dist("something-new", 24.0, Some(0.5), None, None, None));
+        assert_eq!(params, (0.0, 0.0, 0.0, 0));
+        assert!((radius_out(params, 0.5) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_real_24_70_bends_by_about_two_percent_at_mid_frame() {
+        // A guard on the size of the answer, not just its shape. Applied at
+        // 250%, as it was, this came out near five percent, which is what made
+        // straight lines near the edge bow the wrong way.
+        let params = extract_dist_params(&dist(
+            "ptlens", 24.0, None, Some(0.03963), Some(-0.12592), Some(0.08209),
+        ));
+        let ru = 0.5_f64;
+        let moved = (radius_out(params, ru) - ru) / ru;
+        assert!(
+            (0.015..0.025).contains(&moved),
+            "expected about two percent at half radius, got {moved}"
+        );
+        // And what it looked like before: the same numbers at 250%.
+        assert!(
+            moved * 2.5 > 0.045,
+            "the old gain really did push this past four and a half percent"
+        );
+    }
+}
+// =================== BLITZRAW END: what the profile really says ===================
