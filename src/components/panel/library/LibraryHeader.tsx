@@ -24,7 +24,10 @@ import {
   SortDirection,
   ExifOverlay,
   GroupingMode,
-  ThumbnailSize,
+  THUMBNAIL_SIZE_DEFAULT,
+  THUMBNAIL_SIZE_MAX,
+  THUMBNAIL_SIZE_MIN,
+  THUMBNAIL_SIZE_STEP,
   ThumbnailAspectRatio,
 } from '../../ui/AppProperties';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
@@ -33,6 +36,7 @@ import { TextColors, TextVariants, TextWeights, TEXT_COLOR_KEYS } from '../../..
 import Button from '../../ui/Button';
 import Switch from '../../ui/Switch';
 import Dropdown from '../../ui/Dropdown';
+import Slider from '../../ui/Slider';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useUIStore } from '../../../store/useUIStore';
 import { ADVANCED_QUERY_REGEX } from '../../../hooks/useSortedLibrary';
@@ -475,13 +479,12 @@ const groupingOptionKeys = [
 
 interface ViewOptionsDropdownProps {
   libraryViewMode: LibraryViewMode;
-  onSelectSize: (id: ThumbnailSize) => void;
+  onSelectSize: (size: number) => void;
   onSelectAspectRatio: (id: ThumbnailAspectRatio) => void;
   onLibraryRefresh?: () => void;
   setLibraryViewMode: (mode: LibraryViewMode) => void;
-  thumbnailSize: ThumbnailSize;
+  thumbnailSize: number;
   thumbnailAspectRatio: ThumbnailAspectRatio;
-  thumbnailSizeOptions: Array<{ id: ThumbnailSize; label: string; size: number }>;
   thumbnailAspectRatioOptions: Array<{ id: ThumbnailAspectRatio; label: string }>;
   ratingFilterOptions: Array<{ value: number; label: string }>;
   rawStatusOptions: Array<{ key: RawStatus; label: string }>;
@@ -497,7 +500,6 @@ export function ViewOptionsDropdown({
   setLibraryViewMode,
   thumbnailSize,
   thumbnailAspectRatio,
-  thumbnailSizeOptions,
   thumbnailAspectRatioOptions,
   ratingFilterOptions,
   rawStatusOptions,
@@ -621,7 +623,18 @@ export function ViewOptionsDropdown({
               {t('library.header.viewOptions.thumbnailSize')}
             </Text>
             <div className="px-3 mt-1">
-              <SegmentedSwitch options={thumbnailSizeOptions} value={thumbnailSize} onChange={onSelectSize} />
+              {/* No label of its own: the section above already names it, and a
+                  slider with a string label resets to its default when clicked. */}
+              <Slider
+                label={null}
+                defaultValue={THUMBNAIL_SIZE_DEFAULT}
+                min={THUMBNAIL_SIZE_MIN}
+                max={THUMBNAIL_SIZE_MAX}
+                step={THUMBNAIL_SIZE_STEP}
+                value={thumbnailSize}
+                suffix="px"
+                onChange={(e: any) => onSelectSize(Number(e.target.value))}
+              />
             </div>
           </div>
 

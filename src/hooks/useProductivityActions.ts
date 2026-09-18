@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useUIStore } from '../store/useUIStore';
-import { Invokes } from '../components/ui/AppProperties';
+import { Invokes, DenoiseMethod } from '../components/ui/AppProperties';
 
 export function useProductivityActions(refreshImageList: () => Promise<void>) {
   const setUI = useUIStore((state) => state.setUI);
@@ -83,7 +83,7 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
   }, [refreshImageList, setUI]);
 
   const handleApplyDenoise = useCallback(
-    async (intensity: number, method: 'ai' | 'bm3d') => {
+    async (intensity: number, method: DenoiseMethod) => {
       const { denoiseModalState } = useUIStore.getState();
       if (denoiseModalState.targetPaths.length === 0) return;
 
@@ -112,7 +112,7 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
   );
 
   const handleBatchDenoise = useCallback(
-    async (intensity: number, method: 'ai' | 'bm3d', paths: string[]) => {
+    async (intensity: number, method: DenoiseMethod, paths: string[]) => {
       try {
         const savedPaths: string[] = await invoke('batch_denoise_images', { paths, intensity, method });
         await refreshImageList();

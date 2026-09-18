@@ -3,6 +3,7 @@ import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { RawStatus, EditedStatus, SortDirection, ImageFile, GroupingMode } from '../components/ui/AppProperties';
 import { buildImageGroups, GroupBadgeInfo, GroupId } from '../utils/imageGrouping';
+import { buildStacks, StackInfo } from '../utils/imageStacking';
 
 export const ADVANCED_QUERY_REGEX =
   /^(iso|aperture|f|shutter|s|focal|mm|rating|color|camera|make|model|lens)\s*(?::)?\s*(>=|<=|>|<|=)?\s*(.+)$/i;
@@ -38,6 +39,7 @@ export const parseFocalLength = (val: string | undefined): number => {
 export interface GroupedLibrary {
   displayList: ImageFile[];
   badges: Map<GroupId, GroupBadgeInfo> | null;
+  stackInfo: Map<string, StackInfo>;
 }
 
 export function computeGroupedLibrary(libraryState: any, settingsState: any): GroupedLibrary {
@@ -188,12 +190,38 @@ export function computeGroupedLibrary(libraryState: any, settingsState: any): Gr
     }
   }
 
-  const filteredList = processedList.filter((image: ImageFile) => matchesFilter(image));
+  // A stack is filtered as one item, the same way a group already is.
+  //
+  // Rating a collapsed stack marks only the frame on top, since that is the
+  // only one visible. Filtering each frame on its own would then drop the rest
+  // of the bracket, leaving a stack of one: the frames do not merely hide, the
+  // stack stops being a stack. So a stack survives if any of its frames does,
+  // and the rest ride along on that.
+  const passingStackIds = new Set<string>();
+  for (const image of processedList) {
+    if (image.stack_id && matchesFilter(image)) {
+      passingStackIds.add(image.stack_id);
+    }
+  }
+
+  const filteredList = processedList.filter(
+    (image: ImageFile) => matchesFilter(image) || (!!image.stack_id && passingStackIds.has(image.stack_id)),
+  );
+
+  const searchMatchingStackIds = isSearchActive ? new Set<string>() : null;
+  if (searchMatchingStackIds) {
+    for (const image of processedList) {
+      if (image.stack_id && matchesSearch(image)) {
+        searchMatchingStackIds.add(image.stack_id);
+      }
+    }
+  }
 
   const filteredBySearch = !isSearchActive
     ? filteredList
     : filteredList.filter((image: ImageFile) => {
         if (searchMatchingGroupIds && image.group_id && searchMatchingGroupIds.has(image.group_id)) return true;
+        if (searchMatchingStackIds && image.stack_id && searchMatchingStackIds.has(image.stack_id)) return true;
         return matchesSearch(image);
       });
 
@@ -259,7 +287,11 @@ export function computeGroupedLibrary(libraryState: any, settingsState: any): Gr
     ? buildImageGroups(imageList, groupingMode, appSettings?.groupEditedFiles ?? true).badges
     : null;
 
-  return { displayList: list, badges };
+  // Stacks collapse last, after sorting, so the frame left showing is the first
+  // one in the order the user is actually looking at.
+  const { displayList, stackInfo } = buildStacks(list, libraryState.expandedStacks ?? []);
+
+  return { displayList, badges, stackInfo };
 }
 
 export function computeSortedLibrary(libraryState: any, settingsState: any): ImageFile[] {
@@ -272,15 +304,16 @@ export function useSortedLibrary() {
   const filterCriteria = useLibraryStore((state) => state.filterCriteria);
   const searchCriteria = useLibraryStore((state) => state.searchCriteria);
   const sortCriteria = useLibraryStore((state) => state.sortCriteria);
+  const expandedStacks = useLibraryStore((state) => state.expandedStacks);
 
   const appSettings = useSettingsStore((state) => state.appSettings);
 
   const result = useMemo(() => {
     return computeGroupedLibrary(
-      { imageList, imageRatings, filterCriteria, searchCriteria, sortCriteria },
+      { imageList, imageRatings, filterCriteria, searchCriteria, sortCriteria, expandedStacks },
       { appSettings },
     );
-  }, [imageList, sortCriteria, imageRatings, filterCriteria, searchCriteria, appSettings]);
+  }, [imageList, sortCriteria, imageRatings, filterCriteria, searchCriteria, expandedStacks, appSettings]);
 
   return result;
 }

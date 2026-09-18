@@ -18,6 +18,8 @@ import {
   Info,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { BOTH } from '../../../utils/imageStacking';
+import { selectionFor } from '../../../utils/selection';
 import clsx from 'clsx';
 import { Invokes, ImageFile } from '../../ui/AppProperties';
 import { Thumbnail } from './LibraryItems';
@@ -1151,7 +1153,9 @@ export default function CullingView(props: any) {
     ],
   );
 
-  const displayPaths = multiSelectedPaths.slice(-6);
+  // One face per stack on the bench, or a single bracket fills six slots with
+  // the same frame at three exposures.
+  const displayPaths = selectionFor(BOTH('leaderOnly'), multiSelectedPaths).slice(-6);
   const displayImages = displayPaths
     .map((p: string) => imageList.find((img: ImageFile) => img.path === p))
     .filter(Boolean);

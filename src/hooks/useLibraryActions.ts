@@ -2,6 +2,8 @@ import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
 import { useLibraryStore } from '../store/useLibraryStore';
+import { BOTH } from '../utils/imageStacking';
+import { selectionFor } from '../utils/selection';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { Invokes, ImageFile, AlbumItem, Album, AlbumGroup } from '../components/ui/AppProperties';
@@ -11,15 +13,32 @@ import { computeSortedLibrary } from './useSortedLibrary';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
   const handleRate = useCallback((newRating: number, paths?: string[]) => {
-    const { multiSelectedPaths, imageRatings, setLibrary } = useLibraryStore.getState();
+    const { multiSelectedPaths, imageRatings, setLibrary, pushRatingChange } = useLibraryStore.getState();
     const { selectedImage } = useEditorStore.getState();
 
-    const pathsToRate =
+    const requested =
       paths || (multiSelectedPaths.length > 0 ? multiSelectedPaths : selectedImage ? [selectedImage.path] : []);
-    if (pathsToRate.length === 0) return;
+    if (requested.length === 0) return;
 
-    const currentRating = imageRatings[pathsToRate[0]] || 0;
+    // Toggling off keys on what was actually clicked, not on the first frame
+    // the stack happens to expand to.
+    const currentRating = imageRatings[requested[0]] || 0;
     const finalRating = newRating === currentRating ? 0 : newRating;
+
+    // A rating belongs to the capture, so it reaches every frame of a stack of
+    // either kind. One list now drives both the write and the optimistic
+    // update, where the backend used to expand separately and the store had to
+    // guess the same answer to stay in step.
+    const pathsToRate = selectionFor(BOTH('fullStack'), requested);
+
+    // BLITZRAW: what these photos were rated, so Ctrl+Z can put it back. Taken
+    // before anything changes, and only for the photos actually touched.
+    const before: Record<string, number> = {};
+    const after: Record<string, number> = {};
+    pathsToRate.forEach((p) => {
+      before[p] = imageRatings[p] || 0;
+      after[p] = finalRating;
+    });
 
     setLibrary((state) => {
       const newRatings = { ...state.imageRatings };
@@ -29,19 +48,126 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       return { imageRatings: newRatings };
     });
 
+    // Nothing to take back when nothing moved, and recording it would push a
+    // real change out of a bounded stack for no reason.
+    const somethingChanged = pathsToRate.some((p) => before[p] !== after[p]);
+    if (somethingChanged) {
+      pushRatingChange({ before, after });
+    }
+
     invoke(Invokes.SetRatingForPaths, { paths: pathsToRate, rating: finalRating }).catch((err) => {
       console.error(err);
       toast.error(`Failed to apply rating: ${err}`);
     });
   }, []);
 
+  // ============ BLITZRAW: ratings can be taken back ============
+  /**
+   * Writes a set of ratings that are not all the same number.
+   *
+   * The backend command takes one rating for many paths, which is right for
+   * rating a selection and wrong for putting one back: undoing a change across
+   * a stack can restore three different numbers. Grouping by value and sending
+   * one call per value is the whole of it, and there are at most six.
+   *
+   * The store is already correct by the time this runs, so a failure here is
+   * reported rather than rolled back: the sidecar is behind the screen, and
+   * saying so is more use than silently reverting what somebody just watched
+   * happen.
+   */
+  const writeRatings = useCallback(async (ratings: Record<string, number>) => {
+    const byRating = new Map<number, string[]>();
+    Object.entries(ratings).forEach(([path, rating]) => {
+      const group = byRating.get(rating);
+      if (group) {
+        group.push(path);
+      } else {
+        byRating.set(rating, [path]);
+      }
+    });
+
+    for (const [rating, group] of byRating) {
+      try {
+        await invoke(Invokes.SetRatingForPaths, { paths: group, rating });
+      } catch (err) {
+        console.error(err);
+        toast.error(`Failed to apply rating: ${err}`);
+      }
+    }
+  }, []);
+
+  /**
+   * BLITZRAW: nudges every selected photo up or down from wherever it already
+   * is, instead of setting them all to one number.
+   *
+   * Culling a set that already carries stars is the case: three ones and a two
+   * promoted together should become three twos and a three, not four of
+   * whatever was clicked. Each photo is read, moved and clamped on its own.
+   *
+   * Photos already at the end they are being pushed towards are left out of the
+   * write entirely, so pressing "increase" on a five does not cost a file write
+   * or a step in the undo stack.
+   */
+  const handleAdjustRating = useCallback(
+    (delta: number, paths?: string[]) => {
+      const { multiSelectedPaths, imageRatings, setLibrary, pushRatingChange } = useLibraryStore.getState();
+      const { selectedImage } = useEditorStore.getState();
+
+      const requested =
+        paths || (multiSelectedPaths.length > 0 ? multiSelectedPaths : selectedImage ? [selectedImage.path] : []);
+      if (requested.length === 0) return;
+
+      // A rating belongs to the capture, so it reaches every frame of a stack,
+      // exactly as it does when one is set outright.
+      const pathsToRate = selectionFor(BOTH('fullStack'), requested);
+
+      const before: Record<string, number> = {};
+      const after: Record<string, number> = {};
+      pathsToRate.forEach((path) => {
+        const current = imageRatings[path] || 0;
+        const next = Math.max(0, Math.min(5, current + delta));
+        if (next !== current) {
+          before[path] = current;
+          after[path] = next;
+        }
+      });
+
+      if (Object.keys(after).length === 0) return;
+
+      setLibrary((state) => ({ imageRatings: { ...state.imageRatings, ...after } }));
+      pushRatingChange({ before, after });
+      void writeRatings(after);
+    },
+    [writeRatings],
+  );
+
+  const handleUndoRating = useCallback(() => {
+    const change = useLibraryStore.getState().undoRating();
+    if (change) {
+      void writeRatings(change.before);
+    }
+    return Boolean(change);
+  }, [writeRatings]);
+
+  const handleRedoRating = useCallback(() => {
+    const change = useLibraryStore.getState().redoRating();
+    if (change) {
+      void writeRatings(change.after);
+    }
+    return Boolean(change);
+  }, [writeRatings]);
+  // ========== BLITZRAW END: ratings can be taken back ==========
+
   const handleSetColorLabel = useCallback(async (color: string | null, paths?: string[]) => {
     const { multiSelectedPaths, libraryActivePath, imageList, setLibrary } = useLibraryStore.getState();
     const { selectedImage } = useEditorStore.getState();
 
-    const pathsToUpdate =
+    const requested =
       paths || (multiSelectedPaths.length > 0 ? multiSelectedPaths : selectedImage ? [selectedImage.path] : []);
-    if (pathsToUpdate.length === 0) return;
+    if (requested.length === 0) return;
+
+    // Same reasoning as ratings: a colour label describes the capture.
+    const pathsToUpdate = selectionFor(BOTH('fullStack'), requested);
 
     const primaryPath = selectedImage?.path || libraryActivePath;
     const primaryImage = imageList.find((img: ImageFile) => img.path === primaryPath);
@@ -87,7 +213,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     const { multiSelectedPaths, imageList, setLibrary } = useLibraryStore.getState();
     const { selectedImage, setEditor } = useEditorStore.getState();
 
-    const pathsToUpdate =
+    const requested =
       paths && paths.length > 0
         ? paths
         : multiSelectedPaths.length > 0
@@ -95,7 +221,10 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
           : selectedImage
             ? [selectedImage.path]
             : [];
-    if (pathsToUpdate.length === 0) return;
+    if (requested.length === 0) return;
+
+    // Capture metadata, so the whole stack, both kinds.
+    const pathsToUpdate = selectionFor(BOTH('fullStack'), requested);
 
     const physicalPathsSet = new Set(pathsToUpdate.map((p) => p.split('?vc=')[0]));
     const physicalPathsArray = Array.from(physicalPathsSet);
@@ -426,6 +555,9 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
 
   return {
     handleRate,
+    handleAdjustRating,
+    handleUndoRating,
+    handleRedoRating,
     handleSetColorLabel,
     handleTagsChanged,
     handleUpdateExif,

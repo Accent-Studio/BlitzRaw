@@ -6,7 +6,16 @@ import { useTranslation } from 'react-i18next';
 import { Row } from './LibraryItems';
 import { useShallow } from 'zustand/react/shallow';
 import { useLibraryStore } from '../../../store/useLibraryStore';
-import { LibraryViewMode, SortDirection, LibraryDisplayMode } from '../../ui/AppProperties';
+import { useStackToggle } from '../../../hooks/useStackToggle';
+import {
+  LibraryViewMode,
+  SortDirection,
+  LibraryDisplayMode,
+  THUMBNAIL_SIZE_DEFAULT,
+  THUMBNAIL_SIZE_MAX,
+  THUMBNAIL_SIZE_MIN,
+  THUMBNAIL_SIZE_STEP,
+} from '../../ui/AppProperties';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights, TEXT_COLOR_KEYS } from '../../../types/typography';
 import { useProcessStore } from '../../../store/useProcessStore';
@@ -171,18 +180,22 @@ export default function LibraryGrid(props: any) {
     thumbnailAspectRatio,
     imageRatings,
     onRequestThumbnails,
-    thumbnailSizeOptions,
     onThumbnailSizeChange,
     groupBadgeInfo,
+    stackInfo,
+    rawCompression,
   } = props;
-  const { listColumnWidths, setLibrary, sortCriteria, setSortCriteria } = useLibraryStore(
+  const { listColumnWidths, setLibrary, sortCriteria, setSortCriteria, scrollRequest } = useLibraryStore(
     useShallow((state) => ({
       listColumnWidths: state.listColumnWidths,
       setLibrary: state.setLibrary,
       sortCriteria: state.sortCriteria,
       setSortCriteria: state.setSortCriteria,
+      scrollRequest: state.scrollRequest,
     })),
   );
+
+  const { toggleStack: handleToggleStack } = useStackToggle();
 
   const [gridSize, setGridSize] = useState({ height: 0, width: 0 });
   const [listHandle, setListHandle] = useListCallbackRef();
@@ -226,17 +239,16 @@ export default function LibraryGrid(props: any) {
 
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
-        const currentIndex = thumbnailSizeOptions.findIndex((o: any) => o.id === thumbnailSize);
-        if (currentIndex === -1) {
-          return;
-        }
-
-        const nextIndex =
-          event.deltaY < 0
-            ? Math.min(currentIndex + 1, thumbnailSizeOptions.length - 1)
-            : Math.max(currentIndex - 1, 0);
-        if (nextIndex !== currentIndex) {
-          onThumbnailSizeChange(thumbnailSizeOptions[nextIndex].id);
+        // One step of the slider per notch, rather than one of three sizes.
+        const next = Math.min(
+          THUMBNAIL_SIZE_MAX,
+          Math.max(
+            THUMBNAIL_SIZE_MIN,
+            thumbnailSize + (event.deltaY < 0 ? THUMBNAIL_SIZE_STEP : -THUMBNAIL_SIZE_STEP),
+          ),
+        );
+        if (next !== thumbnailSize) {
+          onThumbnailSizeChange(next);
         }
       }
     };
@@ -245,7 +257,7 @@ export default function LibraryGrid(props: any) {
     return () => {
       window.removeEventListener('wheel', handleWheel);
     };
-  }, [thumbnailSize, onThumbnailSizeChange, thumbnailSizeOptions]);
+  }, [thumbnailSize, onThumbnailSizeChange]);
 
   const handleScroll = useMemo(
     () =>
@@ -294,7 +306,7 @@ export default function LibraryGrid(props: any) {
     const isListView = libraryDisplayMode === LibraryDisplayMode.List;
     const OUTER_PADDING = isListView ? 0 : 12;
     const ITEM_GAP = isListView ? 0 : 12;
-    const minThumbWidth = thumbnailSizeOptions.find((o: any) => o.id === thumbnailSize)?.size || 240;
+    const minThumbWidth = thumbnailSize || THUMBNAIL_SIZE_DEFAULT;
 
     const availableWidth = gridSize.width - OUTER_PADDING * 2;
     const columnCount = isListView
@@ -368,7 +380,6 @@ export default function LibraryGrid(props: any) {
     thumbnailSize,
     listColumnWidths.thumbnail,
     currentFolderPath,
-    thumbnailSizeOptions,
   ]);
 
   useEffect(() => {
@@ -385,6 +396,47 @@ export default function LibraryGrid(props: any) {
   const prevActivePath = useRef<string | null>(null);
   const prevDisplayMode = useRef<LibraryDisplayMode | null>(null);
   const prevListElement = useRef<HTMLElement | null>(null);
+  // BLITZRAW: where in the list the selected photo sat last time. Turning a
+  // filter on or off keeps the same photo selected and moves it hundreds of
+  // rows, and the check below was only ever asking whether the photo had
+  // changed. It had not, so nothing scrolled, and the view stayed pointed at
+  // whatever now happened to occupy those pixels. Position is the thing that
+  // actually decides whether a scroll is needed.
+  const prevActiveIndex = useRef<number>(-1);
+
+  // BLITZRAW: how far down the list a given photo's row starts, or null when it
+  // is not in the list. Lifted out of the effect below so the scroll request
+  // effect after it can ask the same question, and so the recursive case, which
+  // has to count folder headings as it goes, is written once.
+  const rowTopForPath = useCallback(
+    (path: string | null): number | null => {
+      if (!path || !gridData) return null;
+
+      const { rowHeight, headerHeight, columnCount } = gridData;
+
+      if (libraryViewMode === LibraryViewMode.Recursive) {
+        let top = 0;
+        const groups = groupImagesByFolder(imageList, currentFolderPath);
+        for (const group of groups) {
+          if (group.images.length === 0) continue;
+
+          top += headerHeight;
+
+          const imageIndex = group.images.findIndex((img) => img.path === path);
+          if (imageIndex !== -1) {
+            return top + Math.floor(imageIndex / columnCount) * rowHeight;
+          }
+
+          top += Math.ceil(group.images.length / columnCount) * rowHeight;
+        }
+        return null;
+      }
+
+      const index = imageList.findIndex((img: any) => img.path === path);
+      return index === -1 ? null : Math.floor(index / columnCount) * rowHeight;
+    },
+    [gridData, imageList, libraryViewMode, currentFolderPath],
+  );
 
   useEffect(() => {
     if (!listHandle?.element || !gridData || multiSelectedPaths.length > 1) {
@@ -395,47 +447,27 @@ export default function LibraryGrid(props: any) {
     }
 
     const element = listHandle.element as HTMLElement;
+    const activeIndex = imageList.findIndex((img: any) => img.path === activePath);
     const isPathSame = activePath === prevActivePath.current;
     const isModeSame = libraryDisplayMode === prevDisplayMode.current;
     const isElementSame = element === prevListElement.current;
+    const isIndexSame = activeIndex === prevActiveIndex.current;
 
-    if (isPathSame && isModeSame && isElementSame) return;
+    if (isPathSame && isModeSame && isElementSame && isIndexSame) return;
 
     prevActivePath.current = activePath;
     prevDisplayMode.current = libraryDisplayMode;
     prevListElement.current = element;
+    prevActiveIndex.current = activeIndex;
 
-    const { rows, rowHeight, headerHeight, columnCount } = gridData;
+    // The photo moved without being reselected, which is a filter or a sort
+    // rearranging the list under it. Centring is the right answer there: the
+    // eye is already on that photo and it should stay where the eye is.
+    const listRearranged = isPathSame && isModeSame && isElementSame && !isIndexSame;
 
-    let targetTop = 0;
-    let found = false;
-
-    if (libraryViewMode === LibraryViewMode.Recursive) {
-      const groups = groupImagesByFolder(imageList, currentFolderPath);
-      for (const group of groups) {
-        if (group.images.length === 0) continue;
-
-        targetTop += headerHeight;
-
-        const imageIndex = group.images.findIndex((img) => img.path === activePath);
-        if (imageIndex !== -1) {
-          const rowIndex = Math.floor(imageIndex / columnCount);
-          targetTop += rowIndex * rowHeight;
-          found = true;
-          break;
-        }
-
-        const rowsInGroup = Math.ceil(group.images.length / columnCount);
-        targetTop += rowsInGroup * rowHeight;
-      }
-    } else {
-      const index = imageList.findIndex((img) => img.path === activePath);
-      if (index !== -1) {
-        const rowIndex = Math.floor(index / columnCount);
-        targetTop = rowIndex * rowHeight;
-        found = true;
-      }
-    }
+    const targetTop = rowTopForPath(activePath);
+    const found = targetTop !== null;
+    const { rowHeight } = gridData;
 
     if (found) {
       const clientHeight = element.clientHeight;
@@ -443,7 +475,7 @@ export default function LibraryGrid(props: any) {
       const itemBottom = targetTop + rowHeight;
       const SCROLL_OFFSET = 120;
 
-      if (!isModeSame || !isElementSame) {
+      if (!isModeSame || !isElementSame || listRearranged) {
         element.scrollTo({
           top: Math.max(0, targetTop - clientHeight / 2 + rowHeight / 2),
           behavior: 'instant',
@@ -469,7 +501,56 @@ export default function LibraryGrid(props: any) {
     imageList,
     libraryViewMode,
     libraryDisplayMode,
+    rowTopForPath,
   ]);
+
+  // ============== BLITZRAW: following a selection that is still growing ==============
+  // Alt and an arrow takes in one more frame per press and leaves the current
+  // one where it started, so the effect above, which follows the current frame
+  // and gives up entirely once more than one photo is selected, never moves.
+  // Without this the frames being taken in walk off the bottom of the screen.
+  //
+  // Only when the frame is actually off screen, and only far enough to bring it
+  // on. Centring every press would swing the whole grid under a gesture that
+  // moves by one row at a time.
+  const lastScrollRequest = useRef<number>(-1);
+
+  useEffect(() => {
+    if (!scrollRequest || !listHandle?.element || !gridData) return;
+    if (scrollRequest.id === lastScrollRequest.current) return;
+    lastScrollRequest.current = scrollRequest.id;
+
+    const top = rowTopForPath(scrollRequest.path);
+    if (top === null) return;
+
+    const element = listHandle.element as HTMLElement;
+    const { rowHeight } = gridData;
+    const clientHeight = element.clientHeight;
+    const scrollTop = element.scrollTop;
+    const itemBottom = top + rowHeight;
+    const SCROLL_OFFSET = 120;
+
+    // A centred request is reopening a session, not following a gesture. Put
+    // the frame in the middle straight away, and record where we left it so the
+    // effect above does not decide the view has drifted and scroll again.
+    if (scrollRequest.center) {
+      element.scrollTo({
+        top: Math.max(0, top - clientHeight / 2 + rowHeight / 2),
+        behavior: 'instant',
+      });
+      prevActivePath.current = scrollRequest.path;
+      prevListElement.current = element;
+      prevActiveIndex.current = imageList.findIndex((img: any) => img.path === scrollRequest.path);
+      return;
+    }
+
+    if (itemBottom > scrollTop + clientHeight) {
+      element.scrollTo({ top: itemBottom - clientHeight + SCROLL_OFFSET, behavior: 'smooth' });
+    } else if (top < scrollTop) {
+      element.scrollTo({ top: Math.max(0, top - SCROLL_OFFSET), behavior: 'smooth' });
+    }
+  }, [scrollRequest, listHandle, gridData, rowTopForPath, imageList]);
+  // ============ BLITZRAW END: following a selection that is still growing ============
 
   const memoizedRowProps = useMemo(() => {
     if (!gridData) return {};
@@ -494,6 +575,9 @@ export default function LibraryGrid(props: any) {
       queueThumbnailRequest,
       onToggleRecursiveFolder: handleToggleRecursiveFolder,
       groupBadgeInfo,
+      stackInfo,
+      onToggleStack: handleToggleStack,
+      rawCompression,
     };
   }, [
     gridData,
@@ -510,6 +594,9 @@ export default function LibraryGrid(props: any) {
     queueThumbnailRequest,
     handleToggleRecursiveFolder,
     groupBadgeInfo,
+    stackInfo,
+    handleToggleStack,
+    rawCompression,
   ]);
 
   const getItemSize = useCallback(

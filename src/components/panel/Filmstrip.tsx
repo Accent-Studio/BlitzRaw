@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
-import { Image as ImageIcon, Star, SlidersHorizontal } from 'lucide-react';
+import { Image as ImageIcon, Layers, Star, SlidersHorizontal } from 'lucide-react';
 import clsx from 'clsx';
 import { Grid, useGridCallbackRef } from 'react-window';
 import { useTranslation } from 'react-i18next';
 import { ImageFile, SelectedImage, ThumbnailAspectRatio, GroupingMode } from '../ui/AppProperties';
+import { StackInfo } from '../../utils/imageStacking';
+import { useStackToggle } from '../../hooks/useStackToggle';
 import { Color, COLOR_LABELS } from '../../utils/adjustments';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
@@ -31,6 +33,9 @@ interface ItemData {
   onImageSelect?: (path: string, event: any) => void;
   itemHeight: number;
   setRatio: (index: number, ratio: number) => void;
+  /** Stacks in the strip. Absent in views that do not collapse them. */
+  stackInfo?: Map<string, StackInfo>;
+  onToggleStack?: (stackId: string) => void;
 }
 
 const FilmstripThumbnail = memo(
@@ -45,6 +50,10 @@ const FilmstripThumbnail = memo(
     itemHeight: _itemHeight,
     index,
     setRatio,
+    stackCount,
+    stackPosition,
+    isStackExpanded,
+    onToggleStack,
   }: {
     imageFile: ImageFile;
     imageRatings: any;
@@ -56,6 +65,10 @@ const FilmstripThumbnail = memo(
     itemHeight: number;
     index: number;
     setRatio: (index: number, ratio: number) => void;
+    stackCount?: number;
+    stackPosition?: number;
+    isStackExpanded?: boolean;
+    onToggleStack?: () => void;
   }) => {
     const { t } = useTranslation();
     const thumbData = useProcessStore((s) => s.thumbnails[imageFile.path]);
@@ -153,6 +166,12 @@ const FilmstripThumbnail = memo(
       });
     }, []);
 
+    // BLITZRAW: same as the grid tile. A frame whose picture will not load
+    // falls back to the placeholder rather than showing a broken-image box.
+    const handleLayerError = useCallback((failedId: string) => {
+      setLayers((prev) => prev.filter((l) => l.id !== failedId));
+    }, []);
+
     const ringClass = isActive
       ? 'ring-2 ring-accent shadow-md'
       : isSelected
@@ -172,6 +191,12 @@ const FilmstripThumbnail = memo(
           onImageSelect?.(path, e);
         }}
         onContextMenu={(e: any) => onContextMenu?.(e, path)}
+        onMouseEnter={() => useLibraryStore.getState().setLibrary({ hoveredPath: path })}
+        onMouseLeave={() =>
+          useLibraryStore.getState().setLibrary((state) =>
+            state.hoveredPath === path ? { hoveredPath: null } : {},
+          )
+        }
         style={{
           zIndex: isActive ? 2 : isSelected ? 1 : 'auto',
         }}
@@ -205,6 +230,7 @@ const FilmstripThumbnail = memo(
                   loading="lazy"
                   decoding="async"
                   src={layer.url}
+                  onError={() => handleLayerError(layer.id)}
                 />
               </div>
             ))}
@@ -213,6 +239,70 @@ const FilmstripThumbnail = memo(
           <div className="w-full h-full flex items-center justify-center bg-surface">
             <ImageIcon size={24} className="text-text-secondary animate-pulse" />
           </div>
+        )}
+
+        {/* ============== BLITZRAW: the frame number, as in the grid ==============
+            On top of the picture rather than behind it. The grid can hide its
+            number under the photo and let it show in the letterbox, but a
+            filmstrip frame in the same mode already fills its letterbox with a
+            blurred copy of the photo, so there is nothing to show through.
+            Faint and shadowed instead, and only on the frame being looked at,
+            which is the whole of its job here: which number am I on.
+            ======================================================================= */}
+        {index >= 0 && (
+          <div
+            aria-hidden
+            className={clsx(
+              'absolute top-0 left-0 z-20 select-none pointer-events-none font-semibold tabular-nums leading-none',
+              // Twice what the grid's number carries. The grid's sits in bare
+              // letterbox and the strip's sits on the picture itself, which is
+              // busy, so the same value read as half as visible there.
+              'text-white/50 transition-opacity duration-200',
+              'drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]',
+              isActive || isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+            )}
+            style={{
+              fontSize: `${Math.max(11, Math.round(_itemHeight * 0.26))}px`,
+              paddingLeft: '0.1em',
+              paddingTop: '0.04em',
+            }}
+          >
+            {index + 1}
+          </div>
+        )}
+
+        {(stackCount ?? 0) > 1 && (
+          <button
+            type="button"
+            aria-label={
+              isStackExpanded
+                ? t('library.stack.collapse', { count: stackCount })
+                : t('library.stack.expand', { count: stackCount })
+            }
+            data-tooltip={
+              isStackExpanded
+                ? t('library.stack.collapse', { count: stackCount })
+                : t('library.stack.expand', { count: stackCount })
+            }
+            className={clsx(
+              'absolute top-1 left-1 z-30 flex items-center gap-1 rounded px-1.5 h-5',
+              'bg-black/70 backdrop-blur-xs text-white text-[11px] font-semibold tabular-nums',
+              'hover:bg-black/90 transition-all duration-200 cursor-pointer',
+              // An open stack keeps its badge: it is the only way to close it
+              // again. Same single-branch choice as the grid, so the two cannot
+              // drift apart on stylesheet order.
+              isStackExpanded ? 'opacity-100 ring-1 ring-white/60' : 'opacity-0 group-hover:opacity-100',
+            )}
+            onClick={(e: any) => {
+              // The badge must not also select the frame underneath it.
+              e.stopPropagation();
+              e.preventDefault();
+              onToggleStack?.();
+            }}
+          >
+            <Layers size={11} />
+            {isStackExpanded && stackPosition ? `${stackPosition}/${stackCount}` : stackCount}
+          </button>
         )}
 
         <div
@@ -301,6 +391,8 @@ const FilmstripCell = ({
   onImageSelect,
   itemHeight,
   setRatio,
+  stackInfo,
+  onToggleStack,
 }: any) => {
   const imageFile = imageList[columnIndex];
   const fullWidth = style.width as number;
@@ -329,6 +421,14 @@ const FilmstripCell = ({
           itemHeight={itemHeight}
           index={columnIndex}
           setRatio={setRatio}
+          stackCount={imageFile.stack_id ? stackInfo?.get(imageFile.stack_id)?.count : undefined}
+          stackPosition={
+            imageFile.stack_id ? stackInfo?.get(imageFile.stack_id)?.positions.get(imageFile.path) : undefined
+          }
+          isStackExpanded={imageFile.stack_id ? stackInfo?.get(imageFile.stack_id)?.isExpanded : false}
+          onToggleStack={
+            imageFile.stack_id ? () => onToggleStack?.(imageFile.stack_id as string) : undefined
+          }
         />
       </div>
     </div>
@@ -356,6 +456,9 @@ const FilmstripList = ({
   const pendingResizeRef = useRef<number | null>(null);
   const lowestPendingIndexRef = useRef<number>(Infinity);
   const isAnimatingScroll = useRef(false);
+  // BLITZRAW: the last scroll request answered, so one is never answered twice.
+  const scrollRequest = useLibraryStore((state) => state.scrollRequest);
+  const lastScrollRequest = useRef<number>(-1);
   const scrollAnimationTimeout = useRef<any>(null);
   const pendingScrollTarget = useRef<number | null>(null);
   const hasCompletedInitialScroll = useRef(false);
@@ -511,14 +614,14 @@ const FilmstripList = ({
 
       if (index !== -1) {
         if (currentPath !== prevSelectedPath.current) {
-          const isVisible = isItemVisible(index);
-
-          if (data.clickTriggeredScroll.current) {
-            data.clickTriggeredScroll.current = false;
-            performSafeScroll(index, true);
-          } else if (!isVisible) {
-            performSafeScroll(index);
-          }
+          // BLITZRAW: the open photo stays in the middle of the strip.
+          // This used to scroll only once the selection had walked off the
+          // edge, so the strip sat still for a dozen arrow presses and then
+          // jumped a screen at once. Every change now recentres, which is what
+          // Lightroom does and what makes the strip readable while culling:
+          // the frames either side of the open one are always the neighbours.
+          data.clickTriggeredScroll.current = false;
+          performSafeScroll(index, true);
           prevSelectedPath.current = currentPath;
         } else {
           if (!hasCompletedInitialScroll.current && !isItemVisible(index)) {
@@ -529,6 +632,38 @@ const FilmstripList = ({
       }
     }
   }, [data.selectedPath, data.imageList, isItemVisible, data.clickTriggeredScroll, performSafeScroll, gridHandle]);
+
+  // ============ BLITZRAW: following a selection that is still growing ============
+  // The same rule the grid follows. The effect above centres the photo that is
+  // open, and Alt with an arrow does not change which photo that is, so nothing
+  // moved and the frames being taken in ran off the end of the strip.
+  //
+  // Where to look and what is open stay separate here too: the open photo keeps
+  // the middle of the strip, and the strip scrolls only far enough to bring the
+  // growing end into view.
+  //
+  // The target is one frame past the end rather than the end itself, so there
+  // is always a frame of what comes next showing. Scrolled flush, the frame
+  // just taken in sits against the edge and there is nothing to aim the next
+  // press at.
+  useEffect(() => {
+    if (!scrollRequest || !gridHandle) return;
+    if (scrollRequest.id === lastScrollRequest.current) return;
+    lastScrollRequest.current = scrollRequest.id;
+
+    const index = data.imageList.findIndex((img) => img.path === scrollRequest.path);
+    if (index === -1 || isItemVisible(index)) return;
+
+    const { start, stop } = visibleRange.current;
+    const lookahead = index > stop ? 1 : index < start ? -1 : 0;
+    const target = Math.max(0, Math.min(data.imageList.length - 1, index + lookahead));
+
+    // 'auto' moves the least it can to bring the frame in, and does nothing at
+    // all when it is already there, which is what keeps a one-frame gesture
+    // from swinging the whole strip.
+    gridHandle.scrollToColumn({ index: target, align: 'auto', behavior: 'smooth' });
+  }, [scrollRequest, gridHandle, data.imageList, isItemVisible]);
+  // ========== BLITZRAW END: following a selection that is still growing ==========
 
   const setRatio = useCallback(
     (index: number, ratio: number) => {
@@ -600,6 +735,12 @@ interface FilmStripProps {
   onImageSelect?(path: string, event: any): void;
   onRequestThumbnails?(paths: string[]): void;
   selectedImage?: SelectedImage;
+  /**
+   * The stacks in `imageList`, so the strip can draw the same badge the grid
+   * draws. Absent means no stack UI, which is what a caller that never
+   * collapses them should pass.
+   */
+  stackInfo?: Map<string, StackInfo>;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   totalImages?: number;
 }
@@ -615,8 +756,12 @@ export default function Filmstrip({
   onImageSelect,
   onRequestThumbnails,
   selectedImage,
+  stackInfo,
   thumbnailAspectRatio,
 }: FilmStripProps) {
+  // The strip shows the same collapsed list the grid does, so opening a stack
+  // here is the same act as opening it there, on the same state.
+  const { toggleStack } = useStackToggle();
   const clickTriggeredScroll = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ height: 0, width: 0 });
@@ -679,6 +824,8 @@ export default function Filmstrip({
             onRequestThumbnails,
             onImageSelect: handleImageSelect,
             clickTriggeredScroll,
+            stackInfo,
+            onToggleStack: toggleStack,
           }}
         />
       )}

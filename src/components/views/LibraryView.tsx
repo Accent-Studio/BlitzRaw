@@ -10,17 +10,20 @@ import { useEditorStore } from '../../store/useEditorStore';
 import { useProcessStore } from '../../store/useProcessStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 
-import { ImageFile, LibraryViewMode, ThumbnailAspectRatio, ThumbnailSize } from '../ui/AppProperties';
+import { ImageFile, LibraryViewMode, ThumbnailAspectRatio } from '../ui/AppProperties';
 import { GroupBadgeInfo, GroupId } from '../../utils/imageGrouping';
+import { StackInfo } from '../../utils/imageStacking';
 
 interface LibraryViewProps {
   sortedImageList: ImageFile[];
   groupBadgeInfo: Map<GroupId, GroupBadgeInfo> | null;
-  thumbnailSize: ThumbnailSize;
+  stackInfo: Map<string, StackInfo>;
+  rawCompression: Record<string, { label: string | null; needsConversion: boolean }>;
+  thumbnailSize: number;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   libraryViewMode: LibraryViewMode;
   isAndroid: boolean;
-  setThumbnailSize: (size: ThumbnailSize) => void;
+  setThumbnailSize: (size: number) => void;
   setThumbnailAspectRatio: (ratio: ThumbnailAspectRatio) => void;
   setLibraryViewMode: (mode: LibraryViewMode) => void;
   handleClearSelection: () => void;
@@ -43,6 +46,8 @@ interface LibraryViewProps {
 export default function LibraryView({
   sortedImageList,
   groupBadgeInfo,
+  stackInfo,
+  rawCompression,
   thumbnailSize,
   thumbnailAspectRatio,
   libraryViewMode,
@@ -134,6 +139,8 @@ export default function LibraryView({
             appSettings={appSettings}
             currentFolderPath={currentFolderPath}
             groupBadgeInfo={groupBadgeInfo}
+            stackInfo={stackInfo}
+            rawCompression={rawCompression}
             imageList={sortedImageList}
             imageRatings={imageRatings}
             importState={importState}
@@ -188,8 +195,10 @@ export default function LibraryView({
             onRate={handleRate}
             onReset={() => handleResetAdjustments()}
             rating={imageRatings[libraryActivePath || ''] || 0}
+            stackInfo={stackInfo}
             thumbnailAspectRatio={thumbnailAspectRatio}
             totalImages={imageList.length}
+            visibleImages={sortedImageList.length}
           />
         )}
       </div>

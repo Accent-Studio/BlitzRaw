@@ -2,7 +2,7 @@ export interface KeybindDefinition {
   action: string;
   description: string;
   defaultCombo: string[];
-  section: 'library' | 'view' | 'rating' | 'panels' | 'editing';
+  section: 'library' | 'view' | 'rating' | 'panels' | 'editing' | 'quick';
 }
 
 export interface KeybindSection {
@@ -13,6 +13,7 @@ export interface KeybindSection {
 export const KEYBIND_SECTIONS: KeybindSection[] = [
   { id: 'library', label: 'settings.keybinds.sections.library' },
   { id: 'editing', label: 'settings.keybinds.sections.editing' },
+  { id: 'quick', label: 'settings.keybinds.sections.quick' },
   { id: 'view', label: 'settings.keybinds.sections.view' },
   { id: 'rating', label: 'settings.keybinds.sections.rating' },
   { id: 'panels', label: 'settings.keybinds.sections.panels' },
@@ -23,6 +24,24 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
     action: 'open_image',
     description: 'settings.keybinds.actions.open_image',
     defaultCombo: ['Enter'],
+    section: 'library',
+  },
+  {
+    action: 'enter_loupe_view',
+    description: 'settings.keybinds.actions.enter_loupe_view',
+    defaultCombo: ['KeyE'],
+    section: 'library',
+  },
+  {
+    action: 'exit_to_grid',
+    description: 'settings.keybinds.actions.exit_to_grid',
+    defaultCombo: ['KeyG'],
+    section: 'library',
+  },
+  {
+    action: 'deselect_all',
+    description: 'settings.keybinds.actions.deselect_all',
+    defaultCombo: ['ctrl', 'KeyD'],
     section: 'library',
   },
   {
@@ -47,6 +66,29 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
     action: 'select_all',
     description: 'settings.keybinds.actions.select_all',
     defaultCombo: ['ctrl', 'KeyA'],
+    section: 'library',
+  },
+  {
+    action: 'extend_selection_next',
+    description: 'settings.keybinds.actions.extend_selection_next',
+    // Alt rather than Shift. Shift plus an arrow is free today, but Shift is
+    // also the modifier every rating and label shortcut already uses, and a
+    // selection that grew because a rating was aimed slightly wrong is a bad
+    // way to find out.
+    defaultCombo: ['alt', 'ArrowRight'],
+    section: 'library',
+  },
+  {
+    action: 'extend_selection_prev',
+    description: 'settings.keybinds.actions.extend_selection_prev',
+    defaultCombo: ['alt', 'ArrowLeft'],
+    section: 'library',
+  },
+  {
+    action: 'invert_selection',
+    description: 'settings.keybinds.actions.invert_selection',
+    // Ctrl+I to match Lightroom. Plain I is the metadata panel and stays free.
+    defaultCombo: ['ctrl', 'KeyI'],
     section: 'library',
   },
   {
@@ -214,7 +256,8 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
   {
     action: 'toggle_export',
     description: 'settings.keybinds.actions.toggle_export',
-    defaultCombo: ['KeyE'],
+    // Ctrl+Shift+E to match Lightroom, which frees plain E for loupe view.
+    defaultCombo: ['ctrl', 'shift', 'KeyE'],
     section: 'panels',
   },
   {

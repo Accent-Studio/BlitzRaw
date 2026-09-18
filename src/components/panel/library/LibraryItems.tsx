@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Image as ImageIcon, Folder, FolderOpen, Star as StarIcon, SlidersHorizontal, CloudOff, Layers } from 'lucide-react';
+import {
+  AlertTriangle,
+  Image as ImageIcon,
+  Folder,
+  FolderOpen,
+  Star as StarIcon,
+  SlidersHorizontal,
+  CloudOff,
+  Layers,
+} from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
@@ -8,6 +17,7 @@ import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights, TEXT_COLOR_KEYS } from '../../../types/typography';
 import { ColumnWidths } from '../MainLibrary';
 import { useProcessStore } from '../../../store/useProcessStore';
+import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { IconAperture, IconFocalLength, IconIso, IconShutter } from '../editor/ExifIcons';
 
@@ -33,6 +43,16 @@ const ThumbnailComponent = ({
   exif,
   isCloudPlaceholder,
   groupBadgeLabel,
+  stackCount,
+  stackPosition,
+  isStackExpanded,
+  onToggleStack,
+  undecodableLabel,
+  /** BLITZRAW: 1-based place in the list on screen, for the Lightroom-style
+      cell number. `tileWidth` is the cell in pixels, so the number keeps the
+      same share of the cell at every thumbnail size. */
+  gridNumber,
+  tileWidth,
 }: any) => {
   const { t } = useTranslation();
   const data = useProcessStore((s) => s.thumbnails[path]);
@@ -128,13 +148,35 @@ const ThumbnailComponent = ({
     });
   }, []);
 
+  // ============== BLITZRAW: a picture that will not load is dropped ==============
+  // A thumbnail URL can point at a file that is not on disk yet, or at one the
+  // webview is refused. The browser then draws its broken-image box with the
+  // file name as the alt text, which is the look of a photo that has been lost
+  // rather than one whose picture is late, and it stays that way for the rest
+  // of the session because nothing ever asks again.
+  //
+  // Dropping the failed layer puts the tile back to the picture it had before,
+  // or to the loading placeholder if it had none. The URL itself is left alone,
+  // so the next `thumbnail-generated` for this photo still brings a fresh one.
+  // The layer effect only adds a layer when the URL changes, so a dropped one
+  // cannot come straight back and loop.
+  const handleLayerError = useCallback((failedId: string) => {
+    setLayers((prev) => prev.filter((l) => l.id !== failedId));
+  }, []);
+  // ============ BLITZRAW END: a picture that will not load is dropped ============
+
+  // An open stack needs to read as a set at a glance, but must never be
+  // mistaken for a selection, so it sits below every other state and uses a
+  // thinner, dimmer ring than the gray-400 selection above it.
   const ringClass = isActive
     ? 'ring-2 ring-inset ring-accent'
     : isSelected
       ? 'ring-2 ring-inset ring-gray-400'
       : isForcedHover
         ? 'ring-2 ring-inset ring-hover-color'
-        : 'group-hover:ring-2 group-hover:ring-inset group-hover:ring-hover-color';
+        : isStackExpanded
+          ? 'ring-1 ring-inset ring-white/50 group-hover:ring-2 group-hover:ring-hover-color'
+          : 'group-hover:ring-2 group-hover:ring-inset group-hover:ring-hover-color';
 
   const colorTag = tags?.find((t: string) => t.startsWith('color:'))?.substring(6);
   const colorLabel = COLOR_LABELS.find((c: Color) => c.name === colorTag);
@@ -144,13 +186,23 @@ const ThumbnailComponent = ({
 
   const hasEditIcon = !!showEditIcon;
   const hasColorLabel = !!colorLabel;
+  // BLITZRAW: the rating left this pill for the name bar at the bottom, where
+  // it reads as stars rather than a digit next to one star. It is no longer a
+  // reason for the pill or the corner shading to appear.
   const hasRating = rating > 0;
   const hasGroupBadge = !!groupBadgeLabel;
-  const hasAnyOverlay = hasEditIcon || hasColorLabel || hasRating || hasGroupBadge;
+  const hasAnyOverlay = hasEditIcon || hasColorLabel || hasGroupBadge;
 
   return (
     <div
-      className="aspect-square bg-surface rounded-md overflow-hidden cursor-pointer group relative flex flex-col transition-all duration-150 transform-gpu [-webkit-mask-image:-webkit-radial-gradient(white,black)]"
+      className={clsx(
+        'aspect-square rounded-md overflow-hidden cursor-pointer group relative flex flex-col transition-all duration-150 transform-gpu [-webkit-mask-image:-webkit-radial-gradient(white,black)]',
+        // Lighter ground behind the frames of an open stack, so the run reads
+        // as one block even where the thumbnails themselves are dark.
+        // card-active rather than a white overlay: it is a theme token and is
+        // lighter than surface in every theme, which a fixed white is not.
+        isStackExpanded ? 'bg-card-active' : 'bg-surface',
+      )}
       data-bench-id="thumbnail"
       onClick={(e: any) => {
         e.stopPropagation();
@@ -158,8 +210,52 @@ const ThumbnailComponent = ({
       }}
       onContextMenu={(e: any) => onContextMenu(e, path)}
       onDoubleClick={() => onImageDoubleClick(path)}
+      onMouseEnter={() => useLibraryStore.getState().setLibrary({ hoveredPath: path })}
+      onMouseLeave={() =>
+        useLibraryStore.getState().setLibrary((state) =>
+          state.hoveredPath === path ? { hoveredPath: null } : {},
+        )
+      }
     >
-      <div className="relative w-full flex-1 min-h-0 z-0 bg-surface">
+      {/* The letterbox either side of a photo that does not fill the square.
+          This is what is actually seen, so the lighter ground has to be here
+          too and not only on the card behind it. */}
+      <div className={clsx('relative w-full flex-1 min-h-0 z-0', isStackExpanded ? 'bg-card-active' : 'bg-surface')}>
+        {/* ============== BLITZRAW: the cell number, as in Lightroom ==============
+            Where you are in the folder, without counting. It is drawn first, so
+            every layer below paints over it, which means it only ever shows in
+            the letterbox a photo leaves when the thumbnail keeps its own ratio.
+            A square crop covers it completely and that is the intent: the
+            number is for orientation, never for reading over the picture.
+
+            Sized from the cell rather than fixed, so it stays the same share of
+            the frame from the smallest thumbnail to the largest.
+            ========================================================================= */}
+        {gridNumber > 0 && (
+          <div
+            aria-hidden
+            className={clsx(
+              'absolute top-0 left-0 select-none pointer-events-none font-semibold tabular-nums leading-none',
+              'text-text-primary/8 transition-opacity duration-200',
+              // On hover, and on the current frame whether or not it is under
+              // the cursor. Carried on every tile at once it read as clutter
+              // across the whole grid; carried on none of them, the one number
+              // actually wanted, where am I in the folder, was the one that
+              // took a mouse move to read. Same forced-hover branch as the zoom
+              // below, so a tile the keyboard is on behaves like one the mouse
+              // is on.
+              isActive || isForcedHover ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+            )}
+            style={{
+              fontSize: `${Math.max(11, Math.round((tileWidth || 160) * 0.152))}px`,
+              paddingLeft: '0.08em',
+              paddingTop: '0.02em',
+            }}
+          >
+            {gridNumber}
+          </div>
+        )}
+
         {layers.length > 0 && (
           <div className="absolute inset-0 w-full h-full">
             {layers.map((layer) => (
@@ -183,6 +279,7 @@ const ThumbnailComponent = ({
                   loading="lazy"
                   src={layer.url}
                   onLoad={() => onLoad(path)}
+                  onError={() => handleLayerError(layer.id)}
                 />
               </div>
             ))}
@@ -252,22 +349,13 @@ const ThumbnailComponent = ({
 
           <div
             className={clsx(
-              'flex items-center gap-0.5 shrink-0 transition-all duration-200 ease-out overflow-hidden',
-              hasRating ? 'max-w-7 opacity-100 scale-100' : 'max-w-0 opacity-0 scale-75 pointer-events-none',
-              hasRating && (hasEditIcon || hasColorLabel) ? 'ml-1.5' : 'ml-0',
-            )}
-          >
-            <Text variant={TextVariants.small} color={TextColors.white}>
-              {rating}
-            </Text>
-            <StarIcon size={12} className="text-white fill-white" />
-          </div>
-
-          <div
-            className={clsx(
               'flex items-center shrink-0 transition-all duration-200 ease-out overflow-hidden',
-              hasGroupBadge ? 'max-w-4 opacity-100 scale-100' : 'max-w-0 opacity-0 scale-75 pointer-events-none',
-              hasGroupBadge && (hasEditIcon || hasColorLabel || hasRating) ? 'ml-1.5' : 'ml-0',
+              // Which formats a capture exists in is reference information, not
+              // something worth carrying on every tile, so it waits for hover.
+              hasGroupBadge
+                ? 'max-w-4 scale-100 opacity-0 group-hover:opacity-100'
+                : 'max-w-0 opacity-0 scale-75 pointer-events-none',
+              hasGroupBadge && (hasEditIcon || hasColorLabel) ? 'ml-1.5' : 'ml-0',
             )}
             data-tooltip={groupBadgeLabel}
           >
@@ -276,13 +364,51 @@ const ThumbnailComponent = ({
         </div>
       </div>
 
-      <div
-        className={clsx(
-          'absolute bottom-0 left-0 right-0 h-16 transition-opacity duration-300 pointer-events-none z-10',
-          'bg-linear-to-t from-black/70 to-transparent',
-          isAlways ? 'opacity-0' : isHover ? 'opacity-100 group-hover:opacity-0' : 'opacity-100',
-        )}
-      />
+      {undecodableLabel && (
+        <div
+          className="absolute top-1.5 right-1.5 z-30 flex items-center gap-1 rounded px-1.5 h-5 bg-amber-500/90 text-black text-[11px] font-semibold"
+          data-tooltip={undecodableLabel}
+        >
+          <AlertTriangle size={11} />
+          RAW
+        </div>
+      )}
+
+      {stackCount > 1 && (
+        <button
+          type="button"
+          aria-label={
+            isStackExpanded
+              ? t('library.stack.collapse', { count: stackCount })
+              : t('library.stack.expand', { count: stackCount })
+          }
+          data-tooltip={
+            isStackExpanded
+              ? t('library.stack.collapse', { count: stackCount })
+              : t('library.stack.expand', { count: stackCount })
+          }
+          className={clsx(
+            'absolute top-1.5 left-1.5 z-30 flex items-center gap-1 rounded px-1.5 h-5',
+            'bg-black/70 backdrop-blur-xs text-white text-[11px] font-semibold tabular-nums',
+            'hover:bg-black/90 transition-all duration-200 cursor-pointer',
+            // An open stack keeps its badge: it is the only way to close it
+            // again, and hiding the control that undoes a state is unkind.
+            // Chosen as one branch rather than two competing opacity classes,
+            // which resolve by stylesheet order rather than by the order here.
+            isStackExpanded ? 'opacity-100 ring-1 ring-white/60' : 'opacity-0 group-hover:opacity-100',
+          )}
+          onClick={(e: any) => {
+            // The badge is the only way in and out of a stack, so it must not
+            // also select or open the image underneath it.
+            e.stopPropagation();
+            e.preventDefault();
+            onToggleStack?.();
+          }}
+        >
+          <Layers size={11} />
+          {isStackExpanded && stackPosition ? `${stackPosition}/${stackCount}` : stackCount}
+        </button>
+      )}
 
       <div
         className={clsx(
@@ -339,20 +465,47 @@ const ThumbnailComponent = ({
           isAlways
             ? 'bg-surface border-t border-border-color/50 pointer-events-auto'
             : isHover
-              ? 'bg-transparent group-hover:bg-surface/60 backdrop-blur-none group-hover:backdrop-blur-md border-t border-transparent group-hover:border-border-color/50 pointer-events-none group-hover:pointer-events-auto'
-              : 'bg-transparent border-t border-transparent pointer-events-none',
+              ? 'bg-black/30 group-hover:bg-surface/60 backdrop-blur-none group-hover:backdrop-blur-md border-t border-transparent group-hover:border-border-color/50 pointer-events-none group-hover:pointer-events-auto'
+              : 'bg-black/30 border-t border-transparent pointer-events-none',
         )}
       >
-        <div className="flex items-end justify-between shrink-0">
+        <div className="flex items-end justify-between gap-1.5 shrink-0">
           <Text
             variant={TextVariants.small}
             className={clsx(
-              'truncate pr-2 transition-colors duration-300',
+              // min-w-0 flex-1 so the name takes the slack and the stars and the
+              // VC badge stay together on the right, rather than the stars
+              // drifting to the middle of the bar.
+              'truncate pr-2 min-w-0 flex-1 transition-colors duration-300',
               isAlways ? 'text-white' : isHover ? 'text-white group-hover:text-white' : 'text-white',
             )}
           >
             {baseName}
           </Text>
+
+          {/* ============ BLITZRAW: the rating sits with the name ============
+              It used to be a digit and one star in the pill at the top right,
+              which had to be read rather than seen. Down here it is one star
+              per star, the way Lightroom draws it, so three reads as three at
+              a glance and at any thumbnail size. Filled stars only: the empty
+              ones are noise on a tile this small.
+              ================================================================= */}
+          {hasRating && (
+            <div
+              // mb-[3px] rather than plain items-end. The row aligns boxes by
+              // their bottoms, and a 12px line box carries about 3px of
+              // descender space under the baseline that a 10px star does not,
+              // so bottom-aligned stars sit that much lower than the name
+              // beside them. The margin gives it back.
+              className="flex items-center gap-px shrink-0 mb-[3px]"
+              data-tooltip={t('library.items.tooltipRating', { count: rating })}
+            >
+              {Array.from({ length: rating }).map((_, i: number) => (
+                <StarIcon key={i} size={10} className="text-white fill-white drop-shadow-md" />
+              ))}
+            </div>
+          )}
+
           {isVirtualCopy && (
             <Text
               as="div"
@@ -555,6 +708,12 @@ const ListItemComponent = ({
     });
   }, []);
 
+  // BLITZRAW: same as the grid tile. A row whose picture will not load falls
+  // back to the placeholder rather than showing a broken-image box.
+  const handleLayerError = useCallback((failedId: string) => {
+    setLayers((prev) => prev.filter((l) => l.id !== failedId));
+  }, []);
+
   const colorTag = tags?.find((t: string) => t.startsWith('color:'))?.substring(6);
   const colorLabel = COLOR_LABELS.find((c: Color) => c.name === colorTag);
 
@@ -617,6 +776,7 @@ const ListItemComponent = ({
                     loading="lazy"
                     src={layer.url}
                     onLoad={() => onLoad(path)}
+                    onError={() => handleLayerError(layer.id)}
                   />
                 </div>
               ))}
@@ -753,6 +913,9 @@ const RowComponent = ({
   queueThumbnailRequest,
   onToggleRecursiveFolder,
   groupBadgeInfo,
+  stackInfo,
+  onToggleStack,
+  rawCompression,
 }: any) => {
   const { t } = useTranslation();
   const row = rows[index];
@@ -844,7 +1007,7 @@ const RowComponent = ({
         boxSizing: 'border-box',
       }}
     >
-      {row.images.map((imageFile: ImageFile) => {
+      {row.images.map((imageFile: ImageFile, columnIndex: number) => {
         let isPrevSelected = false;
         let isNextSelected = false;
 
@@ -903,6 +1066,22 @@ const RowComponent = ({
                 aspectRatio={thumbnailAspectRatio}
                 isCloudPlaceholder={imageFile.is_cloud_placeholder}
                 groupBadgeLabel={imageFile.group_id && groupBadgeInfo?.get(imageFile.group_id)?.label}
+                stackCount={imageFile.stack_id ? stackInfo?.get(imageFile.stack_id)?.count : undefined}
+                stackPosition={
+                  imageFile.stack_id ? stackInfo?.get(imageFile.stack_id)?.positions.get(imageFile.path) : undefined
+                }
+                isStackExpanded={imageFile.stack_id ? stackInfo?.get(imageFile.stack_id)?.isExpanded : false}
+                onToggleStack={imageFile.stack_id ? () => onToggleStack?.(imageFile.stack_id) : undefined}
+                // Counted from the row's own offset, which in recursive mode
+                // restarts per folder. That is what the folder heading above it
+                // already promises, so the two agree.
+                gridNumber={(row.startIndex ?? 0) + columnIndex + 1}
+                tileWidth={itemWidth}
+                undecodableLabel={
+                  rawCompression?.[imageFile.path.split('?vc=')[0]]?.needsConversion
+                    ? `${rawCompression[imageFile.path.split('?vc=')[0]].label}: cannot be developed, convert to DNG first`
+                    : undefined
+                }
               />
             )}
           </div>
