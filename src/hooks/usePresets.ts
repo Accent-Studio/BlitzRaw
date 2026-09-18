@@ -66,18 +66,16 @@ export function usePresets(currentAdjustments: Adjustments) {
   const addPreset = (
     name: string,
     folderId: string | null = null,
-    includeMasks: boolean = false,
-    includeCropTransform: boolean = false,
+    includedAdjustments: Array<string> = [...COPYABLE_ADJUSTMENT_KEYS],
     presetType: 'tool' | 'style' = 'style',
   ) => {
-    const GEOMETRY_KEYS = ADJUSTMENT_GROUPS.geometry.flatMap((group) => group.keys);
-    const MASK_KEYS = ADJUSTMENT_GROUPS.masks.flatMap((group) => group.keys);
-
+    // An explicit list, the same one Copy and Paste offers, rather than two
+    // booleans that decided everything outside masks and crop for you.
+    const included = new Set(includedAdjustments);
     const presetAdjustments: Record<string, any> = {};
 
     for (const key of COPYABLE_ADJUSTMENT_KEYS) {
-      if (!includeMasks && MASK_KEYS.includes(key)) continue;
-      if (!includeCropTransform && GEOMETRY_KEYS.includes(key)) continue;
+      if (!included.has(key)) continue;
 
       if (Object.prototype.hasOwnProperty.call(currentAdjustments, key)) {
         const currentValue = currentAdjustments[key as keyof Adjustments];
@@ -97,8 +95,13 @@ export function usePresets(currentAdjustments: Adjustments) {
       adjustments: presetAdjustments,
       id: crypto.randomUUID(),
       name,
-      includeMasks,
-      includeCropTransform,
+      includedAdjustments,
+      // Kept in step so a preset written here still reads correctly in any
+      // older build, and so the panel's masks badge keeps working.
+      includeMasks: includedAdjustments.includes('masks'),
+      includeCropTransform: ADJUSTMENT_GROUPS.geometry
+        .flatMap((group) => group.keys)
+        .some((key) => includedAdjustments.includes(key)),
       presetType,
     };
 
@@ -190,10 +193,10 @@ export function usePresets(currentAdjustments: Adjustments) {
   const configurePreset = (
     id: string | null,
     name: string,
-    includeMasks: boolean,
-    includeCropTransform: boolean,
+    includedAdjustments: Array<string>,
     presetType: 'tool' | 'style',
   ) => {
+    const included = new Set(includedAdjustments);
     let existingPreset: Preset | null = null;
 
     for (const item of presets) {
@@ -227,8 +230,7 @@ export function usePresets(currentAdjustments: Adjustments) {
         }
       } else {
         for (const key of COPYABLE_ADJUSTMENT_KEYS) {
-          if (!includeMasks && MASK_KEYS.includes(key)) continue;
-          if (!includeCropTransform && GEOMETRY_KEYS.includes(key)) continue;
+          if (!included.has(key)) continue;
           if (newAdjustments[key] === undefined) {
             newAdjustments[key] = INITIAL_ADJUSTMENTS[key as keyof Adjustments];
           }
@@ -236,11 +238,9 @@ export function usePresets(currentAdjustments: Adjustments) {
       }
     }
 
-    if (!includeMasks) {
-      for (const k of MASK_KEYS) delete newAdjustments[k];
-    }
-    if (!includeCropTransform) {
-      for (const k of GEOMETRY_KEYS) delete newAdjustments[k];
+    // Anything switched off goes, whichever group it belongs to.
+    for (const key of COPYABLE_ADJUSTMENT_KEYS) {
+      if (!included.has(key)) delete newAdjustments[key];
     }
 
     let updatedPreset: Preset | null = null;
@@ -250,8 +250,9 @@ export function usePresets(currentAdjustments: Adjustments) {
           ...item.preset,
           name,
           adjustments: newAdjustments,
-          includeMasks,
-          includeCropTransform,
+          includedAdjustments,
+          includeMasks: included.has('masks'),
+          includeCropTransform: GEOMETRY_KEYS.some((key) => included.has(key)),
           presetType,
         };
         return { preset: updatedPreset };
@@ -265,8 +266,9 @@ export function usePresets(currentAdjustments: Adjustments) {
               ...child,
               name,
               adjustments: newAdjustments,
-              includeMasks,
-              includeCropTransform,
+              includedAdjustments,
+              includeMasks: included.has('masks'),
+              includeCropTransform: GEOMETRY_KEYS.some((key) => included.has(key)),
               presetType,
             };
             return updatedPreset;

@@ -45,6 +45,7 @@ import { Adjustments, INITIAL_ADJUSTMENTS, ADJUSTMENT_GROUPS } from '../../../ut
 import { Invokes, OPTION_SEPARATOR, Panel, Preset, SelectedImage } from '../../ui/AppProperties';
 import { useEditorStore } from '../../../store/useEditorStore';
 import { useUIStore } from '../../../store/useUIStore';
+import { resolveLensForImage } from '../../../utils/lensAutodetect';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 
 interface DroppableFolderItemProps {
@@ -885,11 +886,11 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
     expandedFolders,
   ]);
 
-  const handleApplyPreset = (preset: Preset) => {
+  const handleApplyPreset = async (preset: Preset) => {
     if (activePresetId === preset.id) {
       setActivePresetId(null);
       if (baseAdjustments) {
-        setAdjustments(baseAdjustments);
+        setAdjustments(baseAdjustments, `Removed ${preset.name}`);
       }
       setBaseAdjustments(null);
       return;
@@ -899,10 +900,25 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
     setActivePresetId(preset.id);
     setPresetIntensity(100);
 
-    setAdjustments((prevAdjustments: Adjustments) => ({
-      ...prevAdjustments,
-      ...preset.adjustments,
-    }));
+    // BLITZRAW: named after the preset. It used to be named by listing the
+    // forty adjustments it moved, which told me nothing about which preset I
+    // had applied.
+    setAdjustments(
+      (prevAdjustments: Adjustments) => ({
+        ...prevAdjustments,
+        ...preset.adjustments,
+      }),
+      preset.name,
+    );
+
+    // A preset can ask for automatic lens correction, but it cannot carry the
+    // profile: that depends on the lens, focal length and aperture of the photo
+    // being corrected. Look it up for this one, or the mode flips to auto and
+    // nothing visibly happens.
+    if ((preset.adjustments as any)?.lensCorrectionMode === 'auto') {
+      const resolved = await resolveLensForImage(preset.adjustments, selectedImage?.exif);
+      setAdjustments((prev: Adjustments) => ({ ...prev, ...resolved }));
+    }
   };
 
   const handleIntensityChange = useCallback(
@@ -919,23 +935,16 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
 
   const handleSaveConfiguredPreset = async (
     name: string,
-    includeMasks: boolean,
-    includeCropTransform: boolean,
+    includedAdjustments: Array<string>,
     presetType: 'tool' | 'style',
   ) => {
     if (configureModalState.preset) {
-      const updated = configurePreset(
-        configureModalState.preset.id,
-        name,
-        includeMasks,
-        includeCropTransform,
-        presetType,
-      );
+      const updated = configurePreset(configureModalState.preset.id, name, includedAdjustments, presetType);
       if (updated) {
         await generateSinglePreview(updated);
       }
     } else {
-      const newPreset = addPreset(name, null, includeMasks, includeCropTransform, presetType);
+      const newPreset = addPreset(name, null, includedAdjustments, presetType);
       if (newPreset) {
         await generateSinglePreview(newPreset);
       }
