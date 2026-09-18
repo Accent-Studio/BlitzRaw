@@ -9,8 +9,19 @@ import PanelSwitcher from './PanelSwitcher';
 
 const COLLAPSE_THRESHOLD = 200;
 
+/**
+ * Which column this is.
+ *
+ * `float` is the one inside the floating window. It behaves like a sidebar in
+ * every way that matters, which is the point: the tab strips, the drag and
+ * drop between regions, the switcher placement and the vertical split are the
+ * same code, so there is one layout manager and not two. What it does not have
+ * is a width handle, because the window itself is the width.
+ */
+export type PanelSide = 'left' | 'right' | 'float';
+
 interface SidePanelAreaProps {
-  side: 'left' | 'right';
+  side: PanelSide;
   width: number;
   topRegion: PanelRegion;
   bottomRegion: PanelRegion;
@@ -28,7 +39,7 @@ function RegionDroppableContainer({
   isResizing,
 }: {
   region: PanelRegion;
-  side: 'left' | 'right';
+  side: PanelSide;
   renderPanel: (panel: Panel) => React.ReactNode;
   width: number;
   isInstantTransition: boolean;
@@ -81,6 +92,9 @@ function RegionDroppableContainer({
       const y = activeRect.top + activeRect.height / 2 - rect.top;
 
       let intendedPlacement: SwitcherPlacement = 'bottom';
+      // The floating column has no side of the window to lean against, so it
+      // reads like the right-hand one: a tab strip down the right edge or along
+      // the bottom, chosen by which half of the diagonal the tab is dropped in.
       if (side === 'left') {
         const isTopLeft = y < (-rect.height / rect.width) * x + rect.height;
         intendedPlacement = isTopLeft ? 'left' : 'bottom';
@@ -192,7 +206,7 @@ function SplitOverlayDropzone({
   isTop,
 }: {
   region: PanelRegion;
-  side: 'left' | 'right';
+  side: PanelSide;
   isTop: boolean;
 }) {
   const { t } = useTranslation();
@@ -235,6 +249,9 @@ function SplitOverlayDropzone({
       const y = activeRect.top + activeRect.height / 2 - rect.top;
 
       let intendedPlacement: SwitcherPlacement = 'bottom';
+      // The floating column has no side of the window to lean against, so it
+      // reads like the right-hand one: a tab strip down the right edge or along
+      // the bottom, chosen by which half of the diagonal the tab is dropped in.
       if (side === 'left') {
         const isTopLeft = y < (-rect.height / rect.width) * x + rect.height;
         intendedPlacement = isTopLeft ? 'left' : 'bottom';
@@ -321,7 +338,9 @@ export default function SidePanelArea({
   const topPlacement = useUIStore((s) => s.panelSwitcherPlacement[topRegion]);
   const bottomPlacement = useUIStore((s) => s.panelSwitcherPlacement[bottomRegion]);
 
-  const topHeight = useUIStore((s) => (side === 'left' ? s.leftTopHeight : s.rightTopHeight));
+  const topHeight = useUIStore((s) =>
+    side === 'left' ? s.leftTopHeight : side === 'float' ? s.floatTopHeight : s.rightTopHeight,
+  );
   const setUI = useUIStore((s) => s.setUI);
 
   const colContainerRef = useRef<HTMLDivElement>(null);
@@ -340,6 +359,8 @@ export default function SidePanelArea({
 
         if (side === 'left') {
           setUI({ leftTopHeight: newHeight });
+        } else if (side === 'float') {
+          setUI({ floatTopHeight: newHeight });
         } else {
           setUI({ rightTopHeight: newHeight });
         }
@@ -374,14 +395,19 @@ export default function SidePanelArea({
   const isCollapsed = width < COLLAPSE_THRESHOLD;
   const shouldAnimateWidth = !isInstantTransition && (!isResizing || isCollapsed);
 
+  const isFloating = side === 'float';
+
   return (
     <div
       className={clsx(
-        'flex shrink-0 h-full relative overflow-hidden',
-        isFullScreen ? 'w-0 opacity-0 pointer-events-none' : 'opacity-100',
-        shouldAnimateWidth && 'transition-all duration-300 ease-in-out',
+        'flex h-full relative overflow-hidden',
+        // The floating column fills its window; a sidebar is the width it was
+        // dragged to and collapses away with the main window's fullscreen.
+        isFloating ? 'w-full' : 'shrink-0',
+        !isFloating && isFullScreen ? 'w-0 opacity-0 pointer-events-none' : 'opacity-100',
+        !isFloating && shouldAnimateWidth && 'transition-all duration-300 ease-in-out',
       )}
-      style={{ width: isFullScreen ? 0 : width }}
+      style={isFloating ? undefined : { width: isFullScreen ? 0 : width }}
     >
       {side === 'right' && (
         <div className="shrink-0 w-2 my-auto h-full cursor-col-resize z-20" onPointerDown={onWidthChange} />

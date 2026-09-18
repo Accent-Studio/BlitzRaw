@@ -3,15 +3,19 @@ import { motion, LayoutGroup, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useDraggable, useDroppable, useDndMonitor } from '@dnd-kit/core';
+import type { PanelSide } from './SidePanelArea';
 import {
-  SlidersHorizontal,
-  Info,
+  ChartArea,
+  Compass,
   Crop,
-  Layers,
-  Paintbrush,
-  SwatchBook,
   FileInput,
   Folder as FolderIcon,
+  History,
+  Info,
+  Layers,
+  Paintbrush,
+  SlidersHorizontal,
+  SwatchBook,
   type LucideIcon,
 } from 'lucide-react';
 import { Panel, PanelRegion } from '../ui/AppProperties';
@@ -26,6 +30,9 @@ export const PANEL_ICONS: Record<Panel, LucideIcon> = {
   [Panel.Presets]: SwatchBook,
   [Panel.Export]: FileInput,
   [Panel.FolderTree]: FolderIcon,
+  [Panel.Scopes]: ChartArea,
+  [Panel.Navigator]: Compass,
+  [Panel.History]: History,
 };
 
 const PANEL_TITLES: Record<Panel, string> = {
@@ -37,9 +44,12 @@ const PANEL_TITLES: Record<Panel, string> = {
   [Panel.Presets]: 'editor.switcher.tooltips.presets',
   [Panel.Export]: 'editor.switcher.tooltips.export',
   [Panel.FolderTree]: 'library.folders.sourcesTitle',
+  [Panel.Scopes]: 'editor.switcher.tooltips.scopes',
+  [Panel.Navigator]: 'editor.switcher.tooltips.navigator',
+  [Panel.History]: 'editor.switcher.tooltips.history',
 };
 
-function PanelTab({ panel, region, side }: { panel: Panel; region: PanelRegion; side: 'left' | 'right' }) {
+function PanelTab({ panel, region, side }: { panel: Panel; region: PanelRegion; side: PanelSide }) {
   const { t } = useTranslation();
   const activePanels = useUIStore((s) => s.activePanels);
   const setActivePanel = useUIStore((s) => s.setActivePanel);
@@ -58,6 +68,8 @@ function PanelTab({ panel, region, side }: { panel: Panel; region: PanelRegion; 
 
   const handleClick = () => {
     setActivePanel(region, panel);
+    // Clicking a tab in a collapsed sidebar opens the sidebar. The floating
+    // window has no width of its own to open; it is whatever size the window is.
     if (side === 'left' && leftPanelWidth < 200) {
       setUI({ leftPanelWidth: 350 });
     }
@@ -100,7 +112,7 @@ export default function PanelSwitcher({
   placement,
 }: {
   region: PanelRegion;
-  side: 'left' | 'right';
+  side: PanelSide;
   placement: SwitcherPlacement;
 }) {
   const panelLayout = useUIStore((s) => s.panelLayout);
@@ -251,6 +263,9 @@ export function MobilePanelSwitcher({
     Panel.Masks,
     Panel.Ai,
     Panel.Presets,
+    Panel.Scopes,
+    Panel.Navigator,
+    Panel.History,
     Panel.Export,
   ];
 

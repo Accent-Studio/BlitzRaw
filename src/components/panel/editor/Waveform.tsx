@@ -13,6 +13,9 @@ interface WaveformProps {
   showClipping?: boolean;
   onToggleClipping?: () => void;
   theme?: string;
+  /** The vectorscope's trace gain. Ignored by every other scope. */
+  vectorscopeGain?: number;
+  onCycleVectorscopeGain?: () => void;
 }
 
 const modeButtons = [
@@ -456,6 +459,8 @@ export default function Waveform({
   showClipping,
   onToggleClipping,
   theme,
+  vectorscopeGain = 1,
+  onCycleVectorscopeGain,
 }: WaveformProps) {
   const { t } = useTranslation();
   const [isHovered, setIsHovered] = useState(false);
@@ -615,6 +620,25 @@ export default function Waveform({
                     }`}
                   >
                     <AlertOctagon size={14} />
+                  </button>
+                  <div className="w-px h-5 bg-white/20 mx-1 shrink-0"></div>
+                </>
+              )}
+
+              {/* Only the vectorscope has a gain, so the control appears only
+                  when one is showing. It cycles rather than offering four
+                  buttons, because the strip is already five wide and a panel
+                  can be narrow. */}
+              {isVectorscope && onCycleVectorscopeGain && (
+                <>
+                  <button
+                    onClick={onCycleVectorscopeGain}
+                    data-tooltip={t('ui.waveform.tooltips.vectorscopeGain')}
+                    className={`relative flex items-center justify-center w-8 h-7 shrink-0 rounded-lg text-xs font-medium transition-colors duration-150 ${
+                      vectorscopeGain > 1 ? 'bg-accent text-button-text' : 'text-text-primary hover:bg-bg-tertiary'
+                    }`}
+                  >
+                    {vectorscopeGain}x
                   </button>
                   <div className="w-px h-5 bg-white/20 mx-1 shrink-0"></div>
                 </>

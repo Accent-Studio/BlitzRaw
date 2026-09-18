@@ -62,3 +62,39 @@ export const THEMES: Array<ThemeProps> = [
 ];
 
 export const DEFAULT_THEME_ID = Theme.Dark;
+
+/**
+ * Paints a theme onto the document, and the font with it.
+ *
+ * Lifted out of `useAppInitialization` so that a window which is not the whole
+ * application can still have colours. Every colour class in the app resolves
+ * through `--app-*`, and nothing in the stylesheet gives those a value: they
+ * are set here and only here. A window that never runs this has no background
+ * and no text colour, which on WebView2 is a rectangle of plain white. That is
+ * exactly what a detached panel window looked like, and it looked identical to
+ * a page that had failed to load, which is what sent two attempts at it looking
+ * in the wrong place.
+ */
+export function applyTheme(themeId: string | null | undefined, fontFamily?: string | null): void {
+  if (typeof document === 'undefined') {
+    return;
+  }
+  const root = document.documentElement;
+  const base =
+    THEMES.find((theme: ThemeProps) => theme.id === (themeId || DEFAULT_THEME_ID)) ||
+    THEMES.find((theme: ThemeProps) => theme.id === DEFAULT_THEME_ID);
+  if (!base) {
+    return;
+  }
+
+  for (const [key, value] of Object.entries(base.cssVariables)) {
+    root.style.setProperty(key, value as string);
+  }
+
+  root.style.setProperty(
+    '--font-family',
+    fontFamily === 'system'
+      ? '-apple-system, BlinkMacSystemFont, system-ui, sans-serif'
+      : "'Poppins', system-ui, sans-serif",
+  );
+}

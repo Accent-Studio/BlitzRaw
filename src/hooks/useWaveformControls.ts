@@ -13,6 +13,42 @@ export function useWaveformControls() {
     if (appSettings) handleSettingsChange({ ...appSettings, isWaveformVisible: newVal });
   }, [setEditor]);
 
+  /** Replaces the column of scopes, remembering it for next time. */
+  const setWaveformChannels = useCallback(
+    (channels: Array<string>) => {
+      setEditor({ waveformChannels: channels });
+      const { appSettings, handleSettingsChange } = useSettingsStore.getState();
+      if (appSettings) handleSettingsChange({ ...appSettings, waveformChannels: channels });
+    },
+    [setEditor],
+  );
+
+  /**
+   * The vectorscope's gain, remembered for next time.
+   *
+   * One value for the application rather than one per scope in the column. Two
+   * vectorscopes at different gains would be a comparison nobody asked for, and
+   * the backend fills one set of bins per kind of scope in any case.
+   */
+  const setVectorscopeGain = useCallback(
+    (gain: number) => {
+      setEditor({ vectorscopeGain: gain });
+      const { appSettings, handleSettingsChange } = useSettingsStore.getState();
+      if (appSettings) handleSettingsChange({ ...appSettings, vectorscopeGain: gain });
+    },
+    [setEditor],
+  );
+
+  /** The height of each scope in the column, remembered for next time. */
+  const setScopeHeights = useCallback(
+    (heights: Array<number>) => {
+      setEditor({ scopeHeights: heights });
+      const { appSettings, handleSettingsChange } = useSettingsStore.getState();
+      if (appSettings) handleSettingsChange({ ...appSettings, scopeHeights: heights });
+    },
+    [setEditor],
+  );
+
   const setActiveWaveformChannel = useCallback(
     (mode: string) => {
       setEditor({ activeWaveformChannel: mode });
@@ -85,6 +121,9 @@ export function useWaveformControls() {
     isResizingWaveform,
     onToggleWaveform,
     setActiveWaveformChannel,
+    setScopeHeights,
+    setVectorscopeGain,
+    setWaveformChannels,
     setWaveformHeight,
     handleWaveformResize,
   };
