@@ -10,13 +10,136 @@ use image::{
 };
 use ndarray::{Array, Array4, IxDyn};
 use ort::session::Session;
+use ort::session::builder::SessionBuilder;
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::Emitter;
-use tauri::Manager;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex as TokioMutex;
+
+// ============ BLITZRAW: let the graphics card do the work ============
+/// A session that asks the graphics card first.
+///
+/// Every model in the app was running on the processor, because nothing ever
+/// asked for anything else. `Session::builder()` on its own means the CPU, and
+/// the runtime that came with the project had no other option compiled in. The
+/// build now fetches the DirectML one; see `build.rs`.
+///
+/// Registration fails quietly by design in `ort`, falling back to the CPU, so
+/// the card is asked about separately. Otherwise a machine with no suitable
+/// card looks exactly like a machine where this never worked, and the next
+/// person to wonder why a denoise takes four minutes has nothing to read.
+pub fn session_builder(what_for: &str) -> Result<SessionBuilder> {
+    let builder = Session::builder()?;
+
+    #[cfg(windows)]
+    {
+        use ort::execution_providers::{DirectMLExecutionProvider, ExecutionProvider};
+
+        let provider = DirectMLExecutionProvider::default();
+        match provider.is_available() {
+            Ok(true) => log::info!("{what_for}: DirectML is available, using the graphics card"),
+            Ok(false) => log::warn!(
+                "{what_for}: no DirectML device, so this runs on the processor and will be slow"
+            ),
+            Err(e) => log::warn!("{what_for}: could not ask about DirectML ({e})"),
+        }
+
+        // DirectML wants one thing at a time and no memory pattern planning.
+        // With both left on it either refuses the session or quietly produces
+        // wrong pixels, and neither says which.
+        return Ok(builder
+            .with_memory_pattern(false)?
+            .with_execution_providers([provider.build()])?);
+    }
+
+    #[cfg(not(windows))]
+    {
+        log::info!("{what_for}: running on the processor");
+        Ok(builder)
+    }
+}
+// ============ BLITZRAW: proof that the card is really doing it ============
+#[cfg(test)]
+mod directml_probe {
+    //! Whether the graphics card is actually taken up, rather than asked for
+    //! and quietly refused.
+    //!
+    //! `ort` falls back to the processor without complaining when an execution
+    //! provider will not register, which is the right behaviour for the app and
+    //! useless for telling whether any of this works. So this asks with the
+    //! fallback turned off: if DirectML cannot be registered, the session fails
+    //! and the test says why.
+    //!
+    //! ```text
+    //! set RAPIDRAW_TEST_ONNX_MODEL=C:\Users\<you>\AppData\Local\com.blitzraw.app\models\u2net.onnx
+    //! cargo test --lib directml_probe -- --nocapture
+    //! ```
+
+    use ort::execution_providers::{DirectMLExecutionProvider, ExecutionProvider};
+    use ort::session::Session;
+
+    /// A test has no Tauri app to set these up, so it does what `lib.rs` does.
+    fn point_at_the_bundled_runtime() -> std::path::PathBuf {
+        let resources = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        unsafe {
+            std::env::set_var("ORT_DYLIB_PATH", resources.join("onnxruntime.dll"));
+            let existing = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var(
+                "PATH",
+                format!("{};{existing}", resources.to_string_lossy()),
+            );
+        }
+        resources
+    }
+
+    #[test]
+    fn the_card_is_asked_for_and_answers() {
+        let resources = point_at_the_bundled_runtime();
+        println!();
+        println!("runtime    {}", resources.join("onnxruntime.dll").display());
+
+        let provider = DirectMLExecutionProvider::default();
+        match provider.is_available() {
+            Ok(true) => println!("DirectML   available"),
+            Ok(false) => {
+                println!("DirectML   NOT available; everything would run on the processor");
+                return;
+            }
+            Err(e) => {
+                println!("DirectML   could not be asked: {e}");
+                return;
+            }
+        }
+
+        let Ok(model) = std::env::var("RAPIDRAW_TEST_ONNX_MODEL") else {
+            println!("RAPIDRAW_TEST_ONNX_MODEL unset, so no session was built");
+            println!();
+            return;
+        };
+
+        let started = std::time::Instant::now();
+        let built = Session::builder()
+            .and_then(|b| b.with_memory_pattern(false))
+            .and_then(|b| {
+                b.with_execution_providers([provider.build().error_on_failure()])
+            })
+            .and_then(|b| b.commit_from_file(&model));
+
+        match built {
+            Ok(session) => {
+                println!("session    built on DirectML in {:?}", started.elapsed());
+                println!("inputs     {:?}", session.inputs.len());
+                println!();
+            }
+            Err(e) => panic!("DirectML would not take the model: {e}"),
+        }
+    }
+}
+// ========== BLITZRAW END: proof that the card is really doing it ==========
+
+// ========== BLITZRAW END: let the graphics card do the work ==========
 
 const ENCODER_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/sam_vit_b_01ec64_encoder.onnx?download=true";
 const DECODER_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/sam_vit_b_01ec64_decoder.onnx?download=true";
@@ -48,6 +171,60 @@ const CLIP_MODEL_SHA256: &str = "57879bb1c23cdeb350d23569dd251ed4b740a96d747c529
 const DENOISE_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/nind_denoise_utnet_684.onnx?download=true";
 const DENOISE_FILENAME: &str = "nind_denoise_utnet_684.onnx";
 const DENOISE_SHA256: &str = "ee3586279d514df557ff3f7dec6df37fafc51ba5d3a3435b2cc9ac2d9017e7fe";
+
+// ============ BLITZRAW: SCUNet ============
+// The strongest open denoiser for real camera noise. It beats Restormer, and
+// the gap grows as the ISO goes up. NAFNet was the other candidate and is the
+// trap: it benchmarks brilliantly because it was trained on phone sensors, and
+// on the noise a full frame camera makes it can score worse than doing nothing.
+//
+// Blind, so there is no noise level to hand it and nothing to get wrong. It
+// wants [batch, 3, H, W] float32 in 0 to 1 with the sides divisible by eight,
+// which is exactly what the tiling written for the NIND model already produces,
+// so that is reused whole.
+//
+// Apache-2.0 code and MIT weights, both fine beside our AGPL. The weights live
+// outside the graph in a second file, and both have to sit in the same folder
+// or loading fails complaining about a tensor rather than a missing file.
+const SCUNET_URL: &str =
+    "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx";
+const SCUNET_FILENAME: &str = "scunet_color_real_psnr.onnx";
+const SCUNET_SHA256: &str = "231be201ab413dbc999d7951caa9844846b93a12a40a41e037d6b5888ed4e88c";
+const SCUNET_DATA_URL: &str =
+    "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx.data";
+const SCUNET_DATA_FILENAME: &str = "scunet_color_real_psnr.onnx.data";
+const SCUNET_DATA_SHA256: &str =
+    "98825ea1210b641c71e5f052f582c70c49fd44b35387ebe2c034268c17df3feb";
+
+/// The one tile size SCUNet is ever asked for, and it has to be one.
+///
+/// The graph leaves batch, height and width open. DirectML will load a model
+/// like that and then fail part way through a run, on an Add node, with
+/// "the parameter is incorrect" and nothing about shapes at all. Pinning all
+/// three at session time fixes it, and it is also what the DirectML notes ask
+/// for: it plans the whole graph up front and cannot when a side is unknown.
+///
+/// 512 rather than the 504 the other denoiser tiles at. The model card says the
+/// sides must divide by eight, and that is not enough: SCUNet halves the image
+/// three times and then partitions it into windows of eight, so the side has to
+/// survive being divided by sixty-four. 504 gives 63 at the bottom and the
+/// graph refuses to load, blaming an Add node for "incompatible dimensions"
+/// and saying nothing about why.
+const SCUNET_TILE: i64 = 512;
+
+/// The tiling SCUNet is run with. Same shape as the others, sized to the above.
+const TILE_SCUNET: TileParams = TileParams::new(SCUNET_TILE as usize, 448, 12);
+
+/// A SCUNet session with its sides pinned. Used by the app and by the probe, so
+/// that a measurement is of the thing that actually runs.
+pub fn scunet_session(model_path: &Path) -> Result<Session> {
+    Ok(session_builder("SCUNet")?
+        .with_dimension_override("batch", 1)?
+        .with_dimension_override("height", SCUNET_TILE)?
+        .with_dimension_override("width", SCUNET_TILE)?
+        .commit_from_file(model_path)?)
+}
+// ========== BLITZRAW END: SCUNet ==========
 
 const LAMA_URL: &str =
     "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/lama_fp16.onnx?download=true";
@@ -89,6 +266,9 @@ pub struct CachedDepthMap {
 pub struct AiState {
     pub models: Option<Arc<AiModels>>,
     pub denoise_model: Option<Arc<Mutex<Session>>>,
+    /// BLITZRAW: SCUNet, kept apart from the NIND model above so that switching
+    /// between the two does not reload one of them every time.
+    pub scunet_model: Option<Arc<Mutex<Session>>>,
     pub clip_models: Option<Arc<ClipModels>>,
     pub lama_model: Option<Arc<Mutex<Session>>>,
     pub embeddings: Option<ImageEmbeddings>,
@@ -164,7 +344,8 @@ fn edt_2d(grid: &[bool], width: usize, height: usize) -> Vec<f32> {
 }
 
 fn get_models_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf> {
-    let models_dir = app_handle.path().app_data_dir()?.join("models");
+    // BLITZRAW: one data directory, chosen and proved. See data_dir.rs.
+    let models_dir = crate::data_dir::data_path(app_handle, "models");
     if !models_dir.exists() {
         fs::create_dir_all(&models_dir)?;
     }
@@ -382,11 +563,11 @@ pub async fn get_or_init_ai_models(
     let sky_seg_path = models_dir.join(SKYSEG_FILENAME);
     let depth_path = models_dir.join(DEPTH_FILENAME);
 
-    let sam_encoder = Session::builder()?.commit_from_file(encoder_path)?;
-    let sam_decoder = Session::builder()?.commit_from_file(decoder_path)?;
-    let u2netp = Session::builder()?.commit_from_file(u2netp_path)?;
-    let sky_seg = Session::builder()?.commit_from_file(sky_seg_path)?;
-    let depth_anything = Session::builder()?.commit_from_file(depth_path)?;
+    let sam_encoder = session_builder("SAM encoder")?.commit_from_file(encoder_path)?;
+    let sam_decoder = session_builder("SAM decoder")?.commit_from_file(decoder_path)?;
+    let u2netp = session_builder("U2Net")?.commit_from_file(u2netp_path)?;
+    let sky_seg = session_builder("Sky segmentation")?.commit_from_file(sky_seg_path)?;
+    let depth_anything = session_builder("Depth")?.commit_from_file(depth_path)?;
 
     crate::register_exit_handler();
 
@@ -405,6 +586,7 @@ pub async fn get_or_init_ai_models(
         *ai_state_lock = Some(AiState {
             models: Some(models.clone()),
             denoise_model: None,
+            scunet_model: None,
             clip_models: None,
             lama_model: None,
             embeddings: None,
@@ -414,6 +596,135 @@ pub async fn get_or_init_ai_models(
 
     Ok(models)
 }
+
+// ============ BLITZRAW: SCUNet ============
+pub async fn get_or_init_scunet_model(
+    app_handle: &tauri::AppHandle,
+    ai_state_mutex: &Mutex<Option<AiState>>,
+    ai_init_lock: &TokioMutex<()>,
+) -> Result<Arc<Mutex<Session>>> {
+    if let Some(model) = ai_state_mutex
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|state| state.scunet_model.clone())
+    {
+        return Ok(model);
+    }
+
+    let _guard = ai_init_lock.lock().await;
+
+    if let Some(model) = ai_state_mutex
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|state| state.scunet_model.clone())
+    {
+        return Ok(model);
+    }
+
+    let models_dir = get_models_dir(app_handle)?;
+    // The graph first, then the weights it points at. Both have to be there
+    // before the session is built, and the graph is the smaller of the two, so
+    // a run interrupted between them leaves the cheaper half to redo.
+    download_and_verify_model(
+        app_handle,
+        &models_dir,
+        SCUNET_FILENAME,
+        SCUNET_URL,
+        SCUNET_SHA256,
+        "SCUNet Denoise Model",
+    )
+    .await?;
+    download_and_verify_model(
+        app_handle,
+        &models_dir,
+        SCUNET_DATA_FILENAME,
+        SCUNET_DATA_URL,
+        SCUNET_DATA_SHA256,
+        "SCUNet Denoise Weights",
+    )
+    .await?;
+
+    let _ = ort::init().with_name("AI-SCUNet").commit();
+    let model = Arc::new(Mutex::new(scunet_session(&models_dir.join(SCUNET_FILENAME))?));
+
+    crate::register_exit_handler();
+
+    let mut ai_state_lock = ai_state_mutex.lock().unwrap();
+    if let Some(state) = ai_state_lock.as_mut() {
+        state.scunet_model = Some(model.clone());
+    } else {
+        *ai_state_lock = Some(AiState {
+            models: None,
+            denoise_model: None,
+            scunet_model: Some(model.clone()),
+            clip_models: None,
+            lama_model: None,
+            embeddings: None,
+            depth_map: None,
+        });
+    }
+
+    Ok(model)
+}
+
+/// SCUNet over the whole frame, then mixed back toward the original.
+///
+/// The model is blind: it decides for itself how much noise there is and takes
+/// all of it. There is no strength to hand it. So the slider mixes the result
+/// with what went in, which is the only honest way to make a blind model
+/// adjustable, and is what every other application does with one.
+pub fn run_scunet_denoise<R: tauri::Runtime>(
+    rgb_img: &Rgb32FImage,
+    strength: f32,
+    session: &Mutex<Session>,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<DynamicImage> {
+    let _ = app_handle.emit("denoise-progress", "Denoising (SCUNet)...");
+    scunet_denoise_inner(rgb_img, strength, session, &|pct| {
+        let _ = app_handle.emit("denoise-progress", format!("Denoising… {pct:.0}%"));
+    })
+}
+
+/// The part with no Tauri in it, so a probe can drive the real model without
+/// standing up an application to hear about progress.
+pub fn scunet_denoise_inner(
+    rgb_img: &Rgb32FImage,
+    strength: f32,
+    session: &Mutex<Session>,
+    progress: &dyn Fn(f32),
+) -> Result<DynamicImage> {
+    let (width, height) = rgb_img.dimensions();
+
+    let mut accumulator = vec![0.0f32; width as usize * height as usize * 3];
+    run_tiled_denoise(
+        rgb_img,
+        session,
+        &mut accumulator,
+        width as usize,
+        height as usize,
+        progress,
+        // Always the careful tiling. The slider means strength here, not
+        // quality, and a seam is not something anyone asked to trade away.
+        TILE_SCUNET,
+    )?;
+
+    let mix = strength.clamp(0.0, 1.0);
+    let mut out = Rgb32FImage::new(width, height);
+    for (i, p) in out.pixels_mut().enumerate() {
+        let i3 = i * 3;
+        let src = rgb_img.as_raw();
+        *p = Rgb([
+            (src[i3] + (accumulator[i3].clamp(0.0, 1.0) - src[i3]) * mix).clamp(0.0, 1.0),
+            (src[i3 + 1] + (accumulator[i3 + 1].clamp(0.0, 1.0) - src[i3 + 1]) * mix).clamp(0.0, 1.0),
+            (src[i3 + 2] + (accumulator[i3 + 2].clamp(0.0, 1.0) - src[i3 + 2]) * mix).clamp(0.0, 1.0),
+        ]);
+    }
+
+    Ok(DynamicImage::ImageRgb32F(out))
+}
+// ========== BLITZRAW END: SCUNet ==========
 
 pub async fn get_or_init_denoise_model(
     app_handle: &tauri::AppHandle,
@@ -453,7 +764,7 @@ pub async fn get_or_init_denoise_model(
 
     let _ = ort::init().with_name("AI-Denoise").commit();
     let model_path = models_dir.join(DENOISE_FILENAME);
-    let session = Session::builder()?.commit_from_file(model_path)?;
+    let session = session_builder("Denoise")?.commit_from_file(model_path)?;
     let denoise_model = Arc::new(Mutex::new(session));
 
     crate::register_exit_handler();
@@ -465,6 +776,7 @@ pub async fn get_or_init_denoise_model(
         *ai_state_lock = Some(AiState {
             models: None,
             denoise_model: Some(denoise_model.clone()),
+            scunet_model: None,
             clip_models: None,
             lama_model: None,
             embeddings: None,
@@ -522,7 +834,7 @@ pub async fn get_or_init_clip_models(
 
     let _ = ort::init().with_name("AI-Tagging").commit();
     let clip_model_path = models_dir.join(CLIP_MODEL_FILENAME);
-    let model = Mutex::new(Session::builder()?.commit_from_file(clip_model_path)?);
+    let model = Mutex::new(session_builder("Tagging")?.commit_from_file(clip_model_path)?);
     let tokenizer =
         Tokenizer::from_file(clip_tokenizer_path).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -537,6 +849,7 @@ pub async fn get_or_init_clip_models(
         *ai_state_lock = Some(AiState {
             models: None,
             denoise_model: None,
+            scunet_model: None,
             clip_models: Some(clip_models.clone()),
             lama_model: None,
             embeddings: None,
@@ -585,7 +898,7 @@ pub async fn get_or_init_lama_model(
 
     let _ = ort::init().with_name("AI-Inpainting").commit();
     let model_path = models_dir.join(LAMA_FILENAME);
-    let session = Session::builder()?.commit_from_file(model_path)?;
+    let session = session_builder("Inpainting")?.commit_from_file(model_path)?;
     let lama_model = Arc::new(Mutex::new(session));
 
     crate::register_exit_handler();
@@ -597,6 +910,7 @@ pub async fn get_or_init_lama_model(
         *ai_state_lock = Some(AiState {
             models: None,
             denoise_model: None,
+            scunet_model: None,
             clip_models: None,
             lama_model: Some(lama_model.clone()),
             embeddings: None,
@@ -733,13 +1047,15 @@ fn apply_seamless(tile: &mut Array4<f32>, blend: &SeamlessBlend) {
     }
 }
 
-fn run_native_denoise(
+/// BLITZRAW: takes a progress callback rather than an AppHandle, so the tiled
+/// inference can be driven by a probe as well as by the app.
+fn run_tiled_denoise(
     img: &Rgb32FImage,
     session: &Mutex<Session>,
     accumulator: &mut [f32],
     width: usize,
     height: usize,
-    app_handle: &tauri::AppHandle,
+    progress: &dyn Fn(f32),
     params: TileParams,
 ) -> Result<()> {
     let w = width as i32;
@@ -758,8 +1074,7 @@ fn run_native_denoise(
             params.ucs as i32 * yi as i32 - params.overlap as i32 * yi as i32 - params.pad as i32;
 
         if i % 10 == 0 {
-            let pct = (i as f32 / total as f32) * 100.0;
-            let _ = app_handle.emit("denoise-progress", format!("Denoising… {:.0}%", pct));
+            progress((i as f32 / total as f32) * 100.0);
         }
 
         let crop = extract_tile_mirror(img, x0, y0, params.cs);
@@ -828,24 +1143,26 @@ fn accumulator_to_rgb32f(acc: &[f32], width: u32, height: u32) -> Rgb32FImage {
     out
 }
 
-pub fn run_ai_denoise(
+pub fn run_ai_denoise<R: tauri::Runtime>(
     rgb_img: &Rgb32FImage,
     intensity: f32,
     session: &Mutex<Session>,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
 ) -> Result<DynamicImage> {
     let (width, height) = rgb_img.dimensions();
     let params = select_tile_params(intensity);
 
     let _ = app_handle.emit("denoise-progress", "Denoising (AI NIND)...");
     let mut accumulator = vec![0.0f32; width as usize * height as usize * 3];
-    run_native_denoise(
+    run_tiled_denoise(
         rgb_img,
         session,
         &mut accumulator,
         width as usize,
         height as usize,
-        app_handle,
+        &|pct| {
+            let _ = app_handle.emit("denoise-progress", format!("Denoising… {pct:.0}%"));
+        },
         params,
     )?;
 

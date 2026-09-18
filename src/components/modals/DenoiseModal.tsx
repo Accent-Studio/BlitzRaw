@@ -8,12 +8,19 @@ import Slider from '../ui/Slider';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { listen } from '@tauri-apps/api/event';
+import { DenoiseMethod } from '../ui/AppProperties';
+import DenoisePatchPreview from './DenoisePatchPreview';
+
+/// BLITZRAW: the square the preview cleans, in full-resolution pixels. 1024 is
+/// one megapixel, which is about a second, and big enough to hold a face or a
+/// patch of sky rather than a crop of one.
+const PATCH_SIZE = 1024;
 
 interface DenoiseModalProps {
   isOpen: boolean;
   onClose(): void;
-  onDenoise(intensity: number, method: 'ai' | 'bm3d'): void;
-  onBatchDenoise(intensity: number, method: 'ai' | 'bm3d', paths: string[]): Promise<string[]>;
+  onDenoise(intensity: number, method: DenoiseMethod): void;
+  onBatchDenoise(intensity: number, method: DenoiseMethod, paths: string[]): Promise<string[]>;
   onSave(): Promise<string>;
   onOpenFile(path: string): void;
   error: string | null;
@@ -228,15 +235,16 @@ export default function DenoiseModal({
   const [isMounted, setIsMounted] = useState(false);
   const [show, setShow] = useState(false);
   const [intensity, setIntensity] = useState<number>(15);
-  const [method, setMethod] = useState<'ai' | 'bm3d'>('ai');
+  const [method, setMethod] = useState<DenoiseMethod>('scunet');
   const [isSaving, setIsSaving] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; path: string } | null>(null);
   const isBatch = targetPaths.length > 1;
   const mouseDownTarget = useRef<EventTarget | null>(null);
 
-  const methodOptions = useMemo<Array<{ label: string; value: 'ai' | 'bm3d' }>>(
+  const methodOptions = useMemo<Array<{ label: string; value: DenoiseMethod }>>(
     () => [
+      { label: t('modals.denoise.methodScunet'), value: 'scunet' },
       { label: t('modals.denoise.methodAi'), value: 'ai' },
       { label: t('modals.denoise.methodBm3d'), value: 'bm3d' },
     ],
@@ -261,7 +269,7 @@ export default function DenoiseModal({
 
   useEffect(() => {
     if (isOpen) {
-      setMethod(isRaw ? 'ai' : 'bm3d');
+      setMethod(isRaw ? 'scunet' : 'bm3d');
       setIntensity(isRaw ? 50 : 15);
       setIsMounted(true);
       const timer = setTimeout(() => setShow(true), 10);
@@ -421,6 +429,26 @@ export default function DenoiseModal({
       );
     }
 
+    // ============ BLITZRAW: denoise only the bit I am looking at ============
+    // This used to be an icon and a paragraph, and the only way to find out
+    // what a setting did was to run the whole frame and wait a minute. One
+    // square comes back in about a second, so the waiting screen becomes the
+    // working screen.
+    if (!isBatch && targetPaths.length === 1) {
+      return (
+        <div className="h-[460px]">
+          <DenoisePatchPreview
+            path={targetPaths[0]}
+            navigatorUrl={loadingImageUrl ?? null}
+            method={method}
+            intensity={intensity / 100}
+            patchSize={PATCH_SIZE}
+          />
+        </div>
+      );
+    }
+    // ========== BLITZRAW END: denoise only the bit I am looking at ==========
+
     return (
       <div className="flex flex-col items-center justify-center h-[460px]">
         <div className="flex items-center justify-center mb-6">
@@ -471,7 +499,7 @@ export default function DenoiseModal({
               value={method}
               onChange={(val) => {
                 setMethod(val);
-                setIntensity(val === 'ai' ? 50 : 15);
+                setIntensity(val === 'ai' ? 50 : val === 'scunet' ? 100 : 15);
               }}
             />
           </div>
@@ -482,7 +510,7 @@ export default function DenoiseModal({
               min={0}
               max={100}
               step={1}
-              defaultValue={method === 'ai' ? 50 : 15}
+              defaultValue={method === 'ai' ? 50 : method === 'scunet' ? 100 : 15}
               onChange={(e) => setIntensity(Number(e.target.value))}
               trackClassName="bg-bg-secondary"
               fillOrigin="min"

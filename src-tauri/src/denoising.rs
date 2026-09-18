@@ -59,16 +59,28 @@ pub async fn apply_denoising(
     let (source_path, _) = parse_virtual_path(&path);
     let path_str = source_path.to_string_lossy().to_string();
 
+    // BLITZRAW: SCUNet is a third method beside "ai" (NIND) and BM3D.
     let mut ai_session = None;
     if method == "ai" {
-        let session = crate::ai_processing::get_or_init_denoise_model(
-            &app_handle,
-            &state.ai_state,
-            &state.ai_init_lock,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        ai_session = Some(session);
+        ai_session = Some(
+            crate::ai_processing::get_or_init_denoise_model(
+                &app_handle,
+                &state.ai_state,
+                &state.ai_init_lock,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        );
+    } else if method == "scunet" {
+        ai_session = Some(
+            crate::ai_processing::get_or_init_scunet_model(
+                &app_handle,
+                &state.ai_state,
+                &state.ai_init_lock,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        );
     }
 
     let denoise_result_handle = state.denoise_result.clone();
@@ -87,6 +99,155 @@ pub async fn apply_denoising(
     .map_err(|e| format!("Denoising task failed: {}", e))
 }
 
+// ============ BLITZRAW: denoise only the bit I am looking at ============
+/// One square of the picture, cleaned, at full resolution.
+///
+/// SCUNet costs about four seconds a megapixel, so a whole frame is a minute
+/// and choosing a strength by trying one means a minute per try. A square of
+/// 1024 is one megapixel and comes back in about a second, which turns the
+/// question from "wait and see" into "drag the box".
+///
+/// Full resolution on purpose. A denoiser judged on a shrunk preview is judged
+/// on noise the shrinking already removed.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DenoisePatch {
+    /// Both as base64 PNG, ready for an `<img src>`.
+    pub original: String,
+    pub denoised: String,
+    pub width: u32,
+    pub height: u32,
+    /// Where the square really landed, in full-resolution pixels. The asked-for
+    /// centre gets pushed inside the frame near an edge, and the panel has to
+    /// draw the box where it actually is rather than where it asked.
+    pub x: u32,
+    pub y: u32,
+    pub full_width: u32,
+    pub full_height: u32,
+    pub took_ms: u64,
+}
+
+#[tauri::command]
+pub async fn denoise_preview_patch(
+    path: String,
+    centre_x: f32,
+    centre_y: f32,
+    size: u32,
+    intensity: f32,
+    method: String,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<DenoisePatch, String> {
+    let (source_path, _) = parse_virtual_path(&path);
+    let path_str = source_path.to_string_lossy().to_string();
+
+    let session = match method.as_str() {
+        "scunet" => Some(
+            crate::ai_processing::get_or_init_scunet_model(
+                &app_handle,
+                &state.ai_state,
+                &state.ai_init_lock,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        ),
+        "ai" => Some(
+            crate::ai_processing::get_or_init_denoise_model(
+                &app_handle,
+                &state.ai_state,
+                &state.ai_init_lock,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        ),
+        _ => None,
+    };
+
+    // The photo is usually open in the editor, so its decode is already in
+    // hand. Decoding a 45 megapixel raw again would cost more than the denoise.
+    let cached = state
+        .decoded_image_cache
+        .lock()
+        .ok()
+        .and_then(|mut c| c.get(&path_str))
+        .map(|(img, _)| img);
+
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let is_raw = is_raw_file(&path_str);
+
+    tokio::task::spawn_blocking(move || {
+        let base = match cached {
+            Some(img) => img,
+            None => {
+                let bytes = fs::read(&path_str).map_err(|e| e.to_string())?;
+                Arc::new(
+                    load_base_image_from_bytes(&bytes, &path_str, false, &settings, None)
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+        };
+
+        let (full_width, full_height) = base.dimensions();
+        let side = size.clamp(256, 2048).min(full_width).min(full_height);
+        // Clamped so the square stays inside the frame however near the edge
+        // the pointer goes.
+        let x = ((centre_x.clamp(0.0, 1.0) * full_width as f32) as i64 - side as i64 / 2)
+            .clamp(0, (full_width - side) as i64) as u32;
+        let y = ((centre_y.clamp(0.0, 1.0) * full_height as f32) as i64 - side as i64 / 2)
+            .clamp(0, (full_height - side) as i64) as u32;
+
+        let patch = base.crop_imm(x, y, side, side);
+        let patch_rgb = patch.to_rgb32f();
+
+        let started = std::time::Instant::now();
+        let cleaned = match method.as_str() {
+            "scunet" => {
+                let s = session.ok_or_else(|| "SCUNet session not provided".to_string())?;
+                crate::ai_processing::run_scunet_denoise(&patch_rgb, intensity, &s, &app_handle)
+                    .map_err(|e| e.to_string())?
+            }
+            "ai" => {
+                let s = session.ok_or_else(|| "AI session not provided".to_string())?;
+                crate::ai_processing::run_ai_denoise(&patch_rgb, intensity, &s, &app_handle)
+                    .map_err(|e| e.to_string())?
+            }
+            _ => run_bm3d(&patch_rgb, intensity, &app_handle)?,
+        };
+        let took_ms = started.elapsed().as_millis() as u64;
+
+        // Both halves get the same treatment, or the comparison is between a
+        // denoiser and a tone curve.
+        let encode = |mut img: DynamicImage| -> Result<String, String> {
+            if is_raw {
+                apply_cpu_default_raw_processing(&mut img);
+            }
+            let mut buf = Cursor::new(Vec::new());
+            img.to_rgb8()
+                .write_to(&mut buf, ImageFormat::Png)
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "data:image/png;base64,{}",
+                general_purpose::STANDARD.encode(buf.into_inner())
+            ))
+        };
+
+        Ok(DenoisePatch {
+            original: encode(patch)?,
+            denoised: encode(cleaned)?,
+            width: side,
+            height: side,
+            x,
+            y,
+            full_width,
+            full_height,
+            took_ms,
+        })
+    })
+    .await
+    .map_err(|e| format!("Preview task failed: {e}"))?
+}
+// ========== BLITZRAW END: denoise only the bit I am looking at ==========
+
 #[tauri::command]
 pub async fn batch_denoise_images(
     paths: Vec<String>,
@@ -95,16 +256,28 @@ pub async fn batch_denoise_images(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
+    // BLITZRAW: as above, SCUNet is a third method.
     let mut ai_session = None;
     if method == "ai" {
-        let session = crate::ai_processing::get_or_init_denoise_model(
-            &app_handle,
-            &state.ai_state,
-            &state.ai_init_lock,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        ai_session = Some(session);
+        ai_session = Some(
+            crate::ai_processing::get_or_init_denoise_model(
+                &app_handle,
+                &state.ai_state,
+                &state.ai_init_lock,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        );
+    } else if method == "scunet" {
+        ai_session = Some(
+            crate::ai_processing::get_or_init_scunet_model(
+                &app_handle,
+                &state.ai_state,
+                &state.ai_init_lock,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        );
     }
 
     tokio::task::spawn_blocking(move || {
@@ -142,7 +315,8 @@ pub async fn batch_denoise_images(
                     let (output_filename, image_to_save) = if is_raw {
                         (
                             format!("{}_Denoised.tiff", stem),
-                            DynamicImage::ImageRgb16(image.to_rgb16()),
+                            // BLITZRAW: as in save_denoised_image above.
+                            DynamicImage::ImageRgb16(to_viewable(image, true).to_rgb16()),
                         )
                     } else {
                         (
@@ -189,6 +363,29 @@ pub async fn batch_denoise_images(
     .map_err(|e| format!("Batch denoising task failed: {}", e))?
 }
 
+// ============ BLITZRAW: save what the preview showed ============
+// The denoiser hands back linear light, because that is what the pipeline
+// works in. The preview then puts a curve on it so it looks like a photograph,
+// and the file was written without one.
+//
+// Nothing in a TIFF says "this is linear", so everything that opens it assumes
+// otherwise and linearises it a second time. That is the crushed, oversaturated
+// look: shadows squeezed flat and channel ratios stretched, and no amount of
+// pulling on the sliders brings it back, because the information is already
+// gone by then.
+//
+// So the file gets the same curve the preview showed. What you approved is now
+// what lands on disk.
+fn to_viewable(image: DynamicImage, is_raw: bool) -> DynamicImage {
+    if !is_raw {
+        return image;
+    }
+    let mut out = image;
+    apply_cpu_default_raw_processing(&mut out);
+    out
+}
+// ========== BLITZRAW END: save what the preview showed ==========
+
 #[tauri::command]
 pub async fn save_denoised_image(
     original_path_str: String,
@@ -215,7 +412,9 @@ pub async fn save_denoised_image(
         let filename = format!("{}_Denoised.tiff", stem);
         (
             filename,
-            DynamicImage::ImageRgb16(denoised_image.to_rgb16()),
+            // BLITZRAW: the same curve the preview showed, or the file is
+            // linear and everything that opens it linearises it again.
+            DynamicImage::ImageRgb16(to_viewable(denoised_image, true).to_rgb16()),
         )
     } else {
         let filename = format!("{}_Denoised.png", stem);
@@ -317,7 +516,17 @@ fn denoise_image(
 
     let rgb_img_for_denoiser = dynamic_img.to_rgb32f();
 
-    let out_dynamic = if method == "ai" {
+    let out_dynamic = if method == "scunet" {
+        // BLITZRAW
+        let session_arc = ai_session.ok_or_else(|| "SCUNet session not provided".to_string())?;
+        crate::ai_processing::run_scunet_denoise(
+            &rgb_img_for_denoiser,
+            intensity,
+            &session_arc,
+            &app_handle,
+        )
+        .map_err(|e| e.to_string())?
+    } else if method == "ai" {
         let session_arc = ai_session.ok_or_else(|| "AI Session not provided".to_string())?;
         crate::ai_processing::run_ai_denoise(
             &rgb_img_for_denoiser,
@@ -1019,3 +1228,431 @@ fn gaussian_blur_1ch(data: &[f32], width: usize, height: usize, sigma: f32) -> V
 
     out
 }
+
+// ============ BLITZRAW: what the noise in a real frame measures ============
+#[cfg(test)]
+mod noise_probe {
+    //! What noise measures at each of the three sizes the shader cleans at.
+    //!
+    //! The thresholds in `shader.wgsl` decide what counts as noise and what
+    //! counts as detail. Guessing them is how you get a filter that scrubs the
+    //! shadows flat and leaves the highlights dirty, which is exactly what the
+    //! old one did. These print rather than assert: they are measurements, and
+    //! they move with the camera, the lens and the ISO.
+    //!
+    //! ```text
+    //! set RAPIDRAW_TEST_NOISE_RAW=D:\MyPhotos\<shoot>\RAW\_DSC0218.NEF
+    //! cargo test --lib noise_probe -- --nocapture
+    //! ```
+    //!
+    //! `RAPIDRAW_TEST_NOISE_PRESHARPEN` and `RAPIDRAW_TEST_NOISE_COLORNR`
+    //! override the two Base preprocessing settings, so the same frame can be
+    //! measured with them on and off.
+
+    use super::gaussian_blur_1ch;
+    use crate::app_settings::AppSettings;
+    use crate::image_loader::load_base_image_from_bytes;
+
+    /// The reach of each blur in pixels at a 1080 px short edge, and the cap.
+    /// These have to stay in step with the `run_blur` calls in
+    /// `gpu_processing.rs`, or the numbers below describe a filter nobody runs.
+    const BASE_RADII: [f32; 3] = [2.0, 6.0, 16.0];
+    const REACH_CAP: f32 = 64.0;
+
+    /// How much of the crop to throw away before measuring. A blur near the
+    /// edge of a crop reads clamped pixels, which are not noise.
+    const MARGIN: usize = 70;
+
+    const CROP: u32 = 1400;
+
+    fn median_of(values: &mut [f32]) -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        values[values.len() / 2]
+    }
+
+    fn percentile(values: &[f32], p: f32) -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let idx = ((values.len() as f32 - 1.0) * p).round() as usize;
+        values[idx.min(values.len() - 1)]
+    }
+
+    #[test]
+    fn what_the_noise_measures_at_each_size() {
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_NOISE_RAW") else {
+            eprintln!("RAPIDRAW_TEST_NOISE_RAW unset, skipping");
+            return;
+        };
+
+        let mut settings = AppSettings::default();
+        if let Ok(v) = std::env::var("RAPIDRAW_TEST_NOISE_PRESHARPEN") {
+            settings.raw_preprocessing_sharpening = v.parse().ok();
+        }
+        if let Ok(v) = std::env::var("RAPIDRAW_TEST_NOISE_COLORNR") {
+            settings.raw_preprocessing_color_nr = v.parse().ok();
+        }
+
+        let bytes = std::fs::read(&path).expect("could not read the file");
+        let decoded = load_base_image_from_bytes(&bytes, &path, false, &settings, None)
+            .expect("could not decode the file");
+
+        let (full_w, full_h) = (decoded.width(), decoded.height());
+        // The same resolution scale the shader uses, taken from the whole
+        // frame, so the radii below are the ones an export would really run.
+        let scale = (full_w.min(full_h) as f32) / 1080.0;
+
+        let crop_w = CROP.min(full_w);
+        let crop_h = CROP.min(full_h);
+        let crop = decoded
+            .crop_imm((full_w - crop_w) / 2, (full_h - crop_h) / 2, crop_w, crop_h)
+            .to_rgb32f();
+        let (w, h) = (crop.width() as usize, crop.height() as usize);
+
+        println!();
+        println!("file       {}", path);
+        println!("full size  {} x {}", full_w, full_h);
+        println!(
+            "settings   pre-sharpen {:?}, base colour NR {:?}",
+            settings.raw_preprocessing_sharpening, settings.raw_preprocessing_color_nr
+        );
+        println!("crop       {} x {} from the centre", w, h);
+        println!("scale      {:.2} (short edge / 1080)", scale);
+
+        let src = crop.as_raw();
+        let n = w * h;
+        let mut luma = vec![0.0f32; n];
+        let mut ch_r = vec![0.0f32; n];
+        let mut ch_b = vec![0.0f32; n];
+        for i in 0..n {
+            let (r, g, b) = (src[i * 3], src[i * 3 + 1], src[i * 3 + 2]);
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            luma[i] = y;
+            ch_r[i] = r - y;
+            ch_b[i] = b - y;
+        }
+
+        let radii: Vec<f32> = BASE_RADII
+            .iter()
+            .map(|b| (b * scale).ceil().max(1.0).min(REACH_CAP))
+            .collect();
+        println!(
+            "radii      {:.0}, {:.0}, {:.0} px{}",
+            radii[0],
+            radii[1],
+            radii[2],
+            if radii[2] >= REACH_CAP {
+                "  (the coarse one is at the cap)"
+            } else {
+                ""
+            }
+        );
+
+        let blur_all = |data: &[f32]| -> Vec<Vec<f32>> {
+            radii
+                .iter()
+                .map(|r| gaussian_blur_1ch(data, w, h, r / 2.0))
+                .collect()
+        };
+        let by = blur_all(&luma);
+        let br = blur_all(&ch_r);
+        let bb = blur_all(&ch_b);
+
+        // Brightness buckets, taken from the coarsest blur so that noise
+        // cannot decide which bucket a pixel lands in.
+        const EDGES: [f32; 6] = [0.0, 0.01, 0.04, 0.12, 0.35, 1.0e9];
+        const NAMES: [&str; 5] = ["deep shadow", "shadow", "low mid", "mid", "highlight"];
+
+        for (bi, band_name) in ["fine (centre - b1)", "mid (b1 - b2)", "coarse (b2 - b3)"]
+            .iter()
+            .enumerate()
+        {
+            println!();
+            println!("  {}", band_name);
+            println!(
+                "  {:<12} {:>9} {:>10} {:>10} {:>10} {:>10}",
+                "level", "pixels", "luma sig", "luma p99", "col sig", "col p99"
+            );
+
+            for b in 0..5 {
+                let (lo, hi) = (EDGES[b], EDGES[b + 1]);
+                let mut l_vals = Vec::new();
+                let mut c_vals = Vec::new();
+
+                for y in MARGIN..h.saturating_sub(MARGIN) {
+                    for x in MARGIN..w.saturating_sub(MARGIN) {
+                        let i = y * w + x;
+                        let level = by[2][i];
+                        if level < lo || level >= hi {
+                            continue;
+                        }
+                        let (dy, dr, db) = match bi {
+                            0 => (luma[i] - by[0][i], ch_r[i] - br[0][i], ch_b[i] - bb[0][i]),
+                            1 => (
+                                by[0][i] - by[1][i],
+                                br[0][i] - br[1][i],
+                                bb[0][i] - bb[1][i],
+                            ),
+                            _ => (
+                                by[1][i] - by[2][i],
+                                br[1][i] - br[2][i],
+                                bb[1][i] - bb[2][i],
+                            ),
+                        };
+                        l_vals.push(dy.abs());
+                        c_vals.push(dr.abs().max(db.abs()));
+                    }
+                }
+
+                if l_vals.len() < 500 {
+                    continue;
+                }
+                let count = l_vals.len();
+                // 1.4826 turns a median absolute deviation into a standard
+                // deviation for gaussian noise. It is robust: real detail is a
+                // minority of the pixels, so it does not drag the median.
+                let l_sigma = median_of(&mut l_vals) * 1.4826;
+                let c_sigma = median_of(&mut c_vals) * 1.4826;
+                println!(
+                    "  {:<12} {:>9} {:>10.5} {:>10.5} {:>10.5} {:>10.5}",
+                    NAMES[b],
+                    count,
+                    l_sigma,
+                    percentile(&l_vals, 0.99),
+                    c_sigma,
+                    percentile(&c_vals, 0.99),
+                );
+            }
+        }
+
+        println!();
+        println!("  'sig' is the noise. 'p99' is what real detail looks like in");
+        println!("  that band. A threshold has to sit between the two.");
+        println!();
+    }
+
+    /// What SCUNet does to a real frame, and how long it takes.
+    ///
+    /// Runs the model the app would run, through the graphics card, on a crop
+    /// of a real raw, and reports the noise before and against the detail
+    /// before. That is the whole question: does it take the noise without
+    /// taking the picture with it.
+    ///
+    /// ```text
+    /// set RAPIDRAW_TEST_NOISE_RAW=D:\MyPhotos\<shoot>\RAW\_DSC0218.NEF
+    /// cargo test --lib noise_probe::what_scunet -- --nocapture
+    /// ```
+    #[test]
+    fn what_scunet_takes_and_how_long_it_takes_it() {
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_NOISE_RAW") else {
+            eprintln!("RAPIDRAW_TEST_NOISE_RAW unset, skipping");
+            return;
+        };
+
+        let resources = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let models = std::path::PathBuf::from(
+            std::env::var("RAPIDRAW_TEST_MODELS_DIR").unwrap_or_default(),
+        );
+        let model_path = models.join("scunet_color_real_psnr.onnx");
+        if !model_path.exists() {
+            eprintln!("RAPIDRAW_TEST_MODELS_DIR must hold scunet_color_real_psnr.onnx, skipping");
+            return;
+        }
+        unsafe {
+            std::env::set_var("ORT_DYLIB_PATH", resources.join("onnxruntime.dll"));
+            let existing = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", format!("{};{existing}", resources.to_string_lossy()));
+        }
+
+        let bytes = std::fs::read(&path).expect("could not read the file");
+        let decoded =
+            load_base_image_from_bytes(&bytes, &path, false, &AppSettings::default(), None)
+                .expect("could not decode the file");
+        let (fw, fh) = (decoded.width(), decoded.height());
+        let side = 1008u32.min(fw).min(fh); // two whole tiles of 504
+        let before = decoded
+            .crop_imm((fw - side) / 2, (fh - side) / 2, side, side)
+            .to_rgb32f();
+
+        let session = crate::ai_processing::scunet_session(&model_path)
+            .expect("DirectML would not take SCUNet");
+        for input in &session.inputs {
+            println!("input      {} {:?}", input.name, input.input_type);
+        }
+        for output in &session.outputs {
+            println!("output     {} {:?}", output.name, output.output_type);
+        }
+
+        let started = std::time::Instant::now();
+        let out = crate::ai_processing::scunet_denoise_inner(
+            &before,
+            1.0,
+            &std::sync::Mutex::new(session),
+            &|_| {},
+        )
+        .expect("SCUNet failed");
+        let elapsed = started.elapsed();
+        let after = out.to_rgb32f();
+
+        let (w, h) = (side as usize, side as usize);
+        let luma = |img: &image::Rgb32FImage| -> Vec<f32> {
+            let s = img.as_raw();
+            (0..w * h)
+                .map(|i| 0.2126 * s[i * 3] + 0.7152 * s[i * 3 + 1] + 0.0722 * s[i * 3 + 2])
+                .collect()
+        };
+        let (l0, l1) = (luma(&before), luma(&after));
+        let b0 = gaussian_blur_1ch(&l0, w, h, 4.0);
+        let b1 = gaussian_blur_1ch(&l1, w, h, 4.0);
+
+        let mut noise0 = Vec::new();
+        let mut noise1 = Vec::new();
+        let mut kept = Vec::new();
+        for y in MARGIN..h - MARGIN {
+            for x in MARGIN..w - MARGIN {
+                let i = y * w + x;
+                let (d0, d1) = (l0[i] - b0[i], l1[i] - b1[i]);
+                noise0.push(d0.abs());
+                noise1.push(d1.abs());
+                // Only where the detail is far above the noise, so what is
+                // measured here is the picture rather than the grain.
+                if d0.abs() > 0.045 {
+                    kept.push(d1.abs() / d0.abs());
+                }
+            }
+        }
+        let med = |v: &mut Vec<f32>| median_of(v);
+
+        println!();
+        println!("crop       {side} x {side} from a {fw} x {fh} frame");
+        println!("time       {:?} on the graphics card", elapsed);
+        println!(
+            "fine noise {:.5} before, {:.5} after  ({:.0}% gone)",
+            med(&mut noise0.clone()) * 1.4826,
+            med(&mut noise1.clone()) * 1.4826,
+            (1.0 - med(&mut noise1) / med(&mut noise0).max(1e-9)) * 100.0
+        );
+        kept.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
+        println!(
+            "detail     {:.0}% kept at the median, over {} coefficients",
+            percentile(&kept, 0.50) * 100.0,
+            kept.len()
+        );
+        println!();
+    }
+
+    /// How much of a known noise each band ends up holding.
+    ///
+    /// The measurement above cannot tell blotch noise from a real gradient at
+    /// the coarse sizes, because both are smooth and large. This one can: the
+    /// noise is made here, so its size is known exactly, and there is no
+    /// picture underneath to confuse it.
+    ///
+    /// Three kinds, because sensor noise is not one thing. Straight from the
+    /// photosite it is white. Demosaic then spreads each photosite's error
+    /// across its neighbours, which pushes energy down into the wider bands.
+    /// That spreading is what a blotch is.
+    #[test]
+    fn how_much_of_a_known_noise_each_band_holds() {
+        const W: usize = 1024;
+        const RADII: [f32; 3] = [8.0, 23.0, 60.0];
+        const MARGIN: usize = 70;
+        const INPUT_SIGMA: f32 = 0.01;
+
+        // A plain xorshift, so the numbers are the same on every machine and
+        // every run. A measurement nobody can repeat is not a measurement.
+        let mut state: u32 = 0x9E3779B9;
+        let mut next = || -> f32 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state as f32 / u32::MAX as f32) - 0.5
+        };
+        // Twelve uniforms summed is gaussian enough, and has variance 1.
+        let mut white = vec![0.0f32; W * W];
+        for v in white.iter_mut() {
+            let mut acc = 0.0;
+            for _ in 0..12 {
+                acc += next();
+            }
+            *v = acc * INPUT_SIGMA;
+        }
+
+        let renormalise = |mut data: Vec<f32>| -> Vec<f32> {
+            let mean: f32 = data.iter().sum::<f32>() / data.len() as f32;
+            let var: f32 =
+                data.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / data.len() as f32;
+            let k = INPUT_SIGMA / var.sqrt().max(1e-9);
+            for v in data.iter_mut() {
+                *v = (*v - mean) * k;
+            }
+            data
+        };
+
+        let cases: [(&str, Vec<f32>); 3] = [
+            ("white (straight off the sensor)", white.clone()),
+            (
+                "lightly spread (demosaic)",
+                renormalise(gaussian_blur_1ch(&white, W, W, 0.8)),
+            ),
+            (
+                "blotchy (what a high ISO frame looks like)",
+                renormalise(gaussian_blur_1ch(&white, W, W, 4.0)),
+            ),
+        ];
+
+        println!();
+        println!("  input noise sigma {:.4} in every case", INPUT_SIGMA);
+        println!("  blur radii {:?} px", RADII);
+        println!();
+        println!(
+            "  {:<44} {:>10} {:>10} {:>10}",
+            "noise kind", "fine", "mid", "coarse"
+        );
+
+        for (name, data) in cases.iter() {
+            let blurs: Vec<Vec<f32>> = RADII
+                .iter()
+                .map(|r| gaussian_blur_1ch(data, W, W, r / 2.0))
+                .collect();
+
+            let band_sigma = |pick: &dyn Fn(usize) -> f32| -> f32 {
+                let mut acc = 0.0f64;
+                let mut count = 0usize;
+                for y in MARGIN..W - MARGIN {
+                    for x in MARGIN..W - MARGIN {
+                        let d = pick(y * W + x) as f64;
+                        acc += d * d;
+                        count += 1;
+                    }
+                }
+                (acc / count.max(1) as f64).sqrt() as f32
+            };
+
+            let fine = band_sigma(&|i| data[i] - blurs[0][i]);
+            let mid = band_sigma(&|i| blurs[0][i] - blurs[1][i]);
+            let coarse = band_sigma(&|i| blurs[1][i] - blurs[2][i]);
+
+            println!(
+                "  {:<44} {:>10.5} {:>10.5} {:>10.5}",
+                name, fine, mid, coarse
+            );
+            println!(
+                "  {:<44} {:>9.1}% {:>9.1}% {:>9.1}%",
+                "  as a share of the input",
+                fine / INPUT_SIGMA * 100.0,
+                mid / INPUT_SIGMA * 100.0,
+                coarse / INPUT_SIGMA * 100.0
+            );
+        }
+
+        println!();
+        println!("  A threshold for a band is a few times the number on its row.");
+        println!();
+    }
+
+}
+// ========== BLITZRAW END: what the noise in a real frame measures ==========

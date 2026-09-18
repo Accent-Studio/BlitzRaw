@@ -332,7 +332,7 @@ pub async fn start_background_indexing(
                     let path_str = path.to_string_lossy().to_string();
                     let (_, sidecar_path) = parse_virtual_path(&path_str);
 
-                    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+                    let metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     let should_generate_tags = match &metadata.tags {
                         None => true,
@@ -368,12 +368,15 @@ pub async fn start_background_indexing(
                                         existing_tags.into_iter().collect();
                                     final_tags.sort_unstable();
 
-                                    metadata.tags = Some(final_tags);
-
-                                    if let Ok(json_string) = serde_json::to_string_pretty(&metadata)
-                                    {
-                                        let _ = fs::write(sidecar_path, json_string);
-                                    }
+                                    // BLITZRAW: through the write door, and
+                                    // only the tags. Indexing walks a whole
+                                    // folder in the background, so writing back
+                                    // the whole copy it read at the start would
+                                    // quietly undo edits made while it worked.
+                                    let _ = crate::sidecar::update(&sidecar_path, |on_disk| {
+                                        on_disk.tags = Some(final_tags);
+                                        Some(())
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -419,22 +422,18 @@ fn modify_tags_for_path(
 ) -> Result<(), String> {
     let (_, sidecar_path) = parse_virtual_path(path_str);
 
-    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+    crate::sidecar::update(&sidecar_path, |metadata| {
+        let mut tags = metadata.tags.take().unwrap_or_default();
+        modify_fn(&mut tags);
 
-    let mut tags = metadata.tags.unwrap_or_default();
-    modify_fn(&mut tags);
+        tags.sort_unstable();
+        tags.dedup();
 
-    tags.sort_unstable();
-    tags.dedup();
-
-    if tags.is_empty() {
-        metadata.tags = None;
-    } else {
-        metadata.tags = Some(tags);
-    }
-
-    let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
-    fs::write(sidecar_path, json_string).map_err(|e| e.to_string())
+        metadata.tags = if tags.is_empty() { None } else { Some(tags) };
+        Some(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
