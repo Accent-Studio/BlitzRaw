@@ -48,26 +48,28 @@ pub fn load_sidecar(sidecar_path: &Path) -> ImageMetadata {
     };
 
     let mut meta = serde_json::from_str::<ImageMetadata>(&content).unwrap_or_default();
-    let mut healed = false;
+    // BLITZRAW: trimmed on the way out, not written back from here. Reading
+    // used to write, which meant the one function every part of this program
+    // calls to look at a photo could overwrite a change another part had just
+    // made. The trim now happens inside `sidecar::update`, so it lands on the
+    // next real write, under the lock, and a photo nobody is editing is not
+    // rewritten for having a long EXIF string in it. See sidecar.rs.
+    trim_bloated_exif(&mut meta);
+    meta
+}
 
+/// Shortens EXIF values long enough to bloat a sidecar. Returns whether it did.
+pub(crate) fn trim_bloated_exif(meta: &mut ImageMetadata) -> bool {
+    let mut trimmed = false;
     if let Some(ref mut exif_map) = meta.exif {
         for val in exif_map.values_mut() {
             if val.len() > 500 {
                 *val = truncate_large_exif(val);
-                healed = true;
+                trimmed = true;
             }
         }
     }
-
-    if healed && let Ok(json) = serde_json::to_string_pretty(&meta) {
-        let _ = fs::write(sidecar_path, json);
-        log::info!(
-            "Auto-healed bloated sidecar for: {}",
-            sidecar_path.display()
-        );
-    }
-
-    meta
+    trimmed
 }
 
 fn to_ur64(val: &exif::Rational) -> uR64 {
@@ -217,74 +219,105 @@ pub fn read_raw_metadata(file_bytes: &[u8]) -> Option<RawMetadata> {
     decoder.raw_metadata(&raw_source, &Default::default()).ok()
 }
 
+// ============ BLITZRAW: a shutter speed read as a number, not a caption ============
+// The only thing that calls this is the HDR merge, which divides by it. It
+// therefore has to be the real value and not the one printed under the photo.
+// Taking the sidecar's copy first got that wrong twice over.
+//
+// The sidecar holds what the info panel shows, and the panel formats a shutter
+// speed as `1/round(1/t)`. A frame shot at 0.6s comes back from it as
+// "1/2 s", which is short by 20%. The merge then believes the longest frame of
+// a bracket was given less light than it really was, reads its pixels as
+// brighter than they are, and draws a visible line across every smooth surface
+// where that frame fades out of the average. Measured on a real bracket, two
+// frames that should have agreed exactly disagreed by 25% at every level.
+//
+// And `ShutterSpeedValue` is an APEX value rather than a time. The 0.736966 in
+// that field means 2^-0.736966, which is 0.599s, not 0.737s. Reading it as
+// seconds is a fifth of a stop out at 1/2s and wildly out at 1/500s.
+//
+// So the file's own numbers come first now, the sidecar is a fallback for a
+// file that has none, and APEX is converted rather than copied. The formatter
+// is left exactly as it is: "1/2 s" is a perfectly good thing to print, it is
+// just not a thing to divide by.
+/// An APEX shutter speed as seconds. `Tv` of 5 is 1/32s, and of -1 is 2s.
+fn apex_shutter_to_secs(tv: f32) -> Option<f32> {
+    let secs = 2f32.powf(-tv);
+    (secs.is_finite() && secs > 0.0).then_some(secs)
+}
+
+/// Seconds of exposure, for arithmetic rather than for display.
 pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
-    if let Some(map) = read_rrexif_sidecar(Path::new(path))
-        && let Some(val_str) = map.get("ExposureTime").or(map.get("ShutterSpeedValue"))
-    {
-        let cleaned = val_str.replace(" s", "");
-        if cleaned.contains('/') {
-            let parts: Vec<&str> = cleaned.split('/').collect();
-            if parts.len() == 2
-                && let (Ok(num), Ok(den)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>())
-                && den != 0.0
-            {
-                return Some(num / den);
-            }
-        } else if let Ok(val) = cleaned.parse::<f32>() {
-            return Some(val);
-        }
+    let from_apex = apex_shutter_to_secs;
+
+    fn sane(secs: f32) -> Option<f32> {
+        (secs.is_finite() && secs > 0.0).then_some(secs)
     }
 
     if is_raw_file(path)
         && let Some(meta) = read_raw_metadata(file_bytes)
     {
-        if let Some(r) = meta.exif.exposure_time {
-            return if r.d == 0 {
-                None
-            } else {
-                Some(r.n as f32 / r.d as f32)
-            };
-        } else if let Some(r) = meta.exif.shutter_speed_value {
-            return if r.d == 0 {
-                None
-            } else {
-                Some(r.n as f32 / r.d as f32)
-            };
+        if let Some(r) = meta.exif.exposure_time
+            && r.d != 0
+            && let Some(secs) = sane(r.n as f32 / r.d as f32)
+        {
+            return Some(secs);
+        }
+        if let Some(r) = meta.exif.shutter_speed_value
+            && r.d != 0
+            && let Some(secs) = from_apex(r.n as f32 / r.d as f32)
+        {
+            return Some(secs);
         }
     }
 
     if let Some(exif) = read_exif(file_bytes) {
-        if let Some(exposure) = exif.get_field(exif::Tag::ExposureTime, In::PRIMARY) {
-            if let Value::Rational(ref r) = exposure.value {
-                if r.is_empty() {
-                    return None;
-                }
-
-                let val = r.first()?;
-
-                return if val.denom == 0 {
-                    None
-                } else {
-                    Some(val.num as f32 / val.denom as f32)
-                };
-            }
-        } else if let Some(shutter_speed) =
-            exif.get_field(exif::Tag::ShutterSpeedValue, In::PRIMARY)
-            && let Value::Rational(ref r) = shutter_speed.value
+        if let Some(exposure) = exif.get_field(exif::Tag::ExposureTime, In::PRIMARY)
+            && let Value::Rational(ref r) = exposure.value
+            && let Some(val) = r.first()
+            && val.denom != 0
+            && let Some(secs) = sane(val.num as f32 / val.denom as f32)
         {
-            if r.is_empty() {
-                return None;
-            }
-
-            let val = r.first()?;
-
-            return if val.denom == 0 {
-                None
-            } else {
-                Some(val.num as f32 / val.denom as f32)
-            };
+            return Some(secs);
+        }
+        // Signed, because a shutter faster than a second is a positive APEX
+        // value and one slower than a second is a negative one.
+        if let Some(shutter_speed) = exif.get_field(exif::Tag::ShutterSpeedValue, In::PRIMARY)
+            && let Value::SRational(ref r) = shutter_speed.value
+            && let Some(val) = r.first()
+            && val.denom != 0
+            && let Some(secs) = from_apex(val.num as f32 / val.denom as f32)
+        {
+            return Some(secs);
         }
     }
+
+    // And only then what was written down for the panel, for a file whose own
+    // metadata we cannot read at all.
+    if let Some(map) = read_rrexif_sidecar(Path::new(path)) {
+        if let Some(val_str) = map.get("ExposureTime") {
+            let cleaned = val_str.replace(" s", "");
+            if let Some((num, den)) = cleaned.split_once('/') {
+                if let (Ok(num), Ok(den)) = (num.trim().parse::<f32>(), den.trim().parse::<f32>())
+                    && den != 0.0
+                    && let Some(secs) = sane(num / den)
+                {
+                    return Some(secs);
+                }
+            } else if let Ok(val) = cleaned.trim().parse::<f32>()
+                && let Some(secs) = sane(val)
+            {
+                return Some(secs);
+            }
+        }
+        if let Some(val_str) = map.get("ShutterSpeedValue")
+            && let Ok(tv) = val_str.trim().parse::<f32>()
+            && let Some(secs) = from_apex(tv)
+        {
+            return Some(secs);
+        }
+    }
+    // ========== BLITZRAW END: a shutter speed read as a number, not a caption ==========
     None
 }
 
@@ -1312,11 +1345,32 @@ fn load_primary_metadata(image_path: &Path) -> ImageMetadata {
     load_sidecar(&primary)
 }
 
-fn save_primary_metadata(image_path: &Path, metadata: &ImageMetadata) -> std::io::Result<()> {
-    let primary = get_primary_sidecar_path(image_path);
-    let json = serde_json::to_string_pretty(metadata).map_err(std::io::Error::other)?;
-    fs::write(&primary, json)
+// ================== BLITZRAW: camera-calibrated white balance ==================
+
+/// Reads the calibration a derived file inherited, if it has one.
+pub fn read_camera_profile_sidecar(
+    image_path: &Path,
+) -> Option<crate::camera_profile::StoredProfile> {
+    load_primary_metadata(image_path).camera_profile
 }
+
+/// Records the calibration a derived file inherited from the RAW it came from.
+///
+/// Merges into whatever the sidecar already holds rather than replacing it, so
+/// a rating or an adjustment written first is not lost.
+pub fn write_camera_profile_sidecar(
+    image_path: &Path,
+    profile: &crate::camera_profile::StoredProfile,
+) -> std::io::Result<()> {
+    let primary = get_primary_sidecar_path(image_path);
+    crate::sidecar::update(&primary, |meta| {
+        meta.camera_profile = Some(profile.clone());
+        Some(())
+    })
+    .map(|_| ())
+}
+
+// ================ BLITZRAW END: camera-calibrated white balance ================
 
 pub fn read_rrexif_sidecar(image_path: &Path) -> Option<HashMap<String, String>> {
     let metadata = load_primary_metadata(image_path);
@@ -1329,9 +1383,12 @@ pub fn read_rrexif_sidecar(image_path: &Path) -> Option<HashMap<String, String>>
         && let Ok(content) = fs::read_to_string(&legacy)
         && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content)
     {
-        let mut migrated = load_primary_metadata(image_path);
-        migrated.exif = Some(map.clone());
-        if save_primary_metadata(image_path, &migrated).is_ok() {
+        let primary = get_primary_sidecar_path(image_path);
+        let written = crate::sidecar::update(&primary, |meta| {
+            meta.exif = Some(map.clone());
+            Some(())
+        });
+        if matches!(written, Ok(Some(()))) {
             let _ = fs::remove_file(&legacy);
         }
         return Some(map);
@@ -1377,9 +1434,11 @@ pub fn read_exif_data(path: &str, file_bytes: &[u8]) -> HashMap<String, String> 
 
     let exif_map = read_exif_data_from_bytes(path, file_bytes);
     if !exif_map.is_empty() {
-        let mut metadata = load_primary_metadata(source_path);
-        metadata.exif = Some(exif_map.clone());
-        let _ = save_primary_metadata(source_path, &metadata);
+        let primary = get_primary_sidecar_path(source_path);
+        let _ = crate::sidecar::update(&primary, |meta| {
+            meta.exif = Some(exif_map.clone());
+            Some(())
+        });
     }
     exif_map
 }
@@ -1392,14 +1451,18 @@ pub fn persist_exif_if_missing(source_path: &Path, source_path_str: &str, file_b
         }
     }
 
+    let primary = get_primary_sidecar_path(source_path);
+
     let legacy = get_rrexif_path(source_path);
     if legacy.exists()
         && let Ok(content) = fs::read_to_string(&legacy)
         && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content)
     {
-        let mut metadata = load_primary_metadata(source_path);
-        metadata.exif = Some(map);
-        if save_primary_metadata(source_path, &metadata).is_ok() {
+        let written = crate::sidecar::update(&primary, |meta| {
+            meta.exif = Some(map);
+            Some(())
+        });
+        if matches!(written, Ok(Some(()))) {
             let _ = fs::remove_file(&legacy);
         }
         return;
@@ -1410,12 +1473,16 @@ pub fn persist_exif_if_missing(source_path: &Path, source_path_str: &str, file_b
         return;
     }
 
-    let mut metadata = load_primary_metadata(source_path);
-
-    if metadata.exif.is_none() {
-        metadata.exif = Some(exif_map);
-        let _ = save_primary_metadata(source_path, &metadata);
-    }
+    // Checked again inside the lock. This runs from every decode, so between
+    // the check above and here another decode of the same photo may already
+    // have written it, and rewriting would be a modification time for nothing.
+    let _ = crate::sidecar::update(&primary, |meta| {
+        if meta.exif.is_some() {
+            return None;
+        }
+        meta.exif = Some(exif_map);
+        Some(())
+    });
 }
 
 pub fn write_rrexif_sidecar(source_path_str: &str, target_image_path: &Path) -> Result<(), String> {
@@ -1433,8 +1500,57 @@ pub fn write_rrexif_sidecar(source_path_str: &str, target_image_path: &Path) -> 
         return Ok(());
     }
 
-    let mut metadata = load_primary_metadata(target_image_path);
-    metadata.exif = Some(exif_data);
-    save_primary_metadata(target_image_path, &metadata)
-        .map_err(|e| format!("Failed to write sidecar: {}", e))
+    let primary = get_primary_sidecar_path(target_image_path);
+    crate::sidecar::update(&primary, |meta| {
+        meta.exif = Some(exif_data);
+        Some(())
+    })
+    .map(|_| ())
+    .map_err(|e| format!("Failed to write sidecar: {}", e))
 }
+
+// ============ BLITZRAW: what an APEX shutter speed is worth ============
+#[cfg(test)]
+mod blitzraw_exposure_tests {
+    use super::apex_shutter_to_secs;
+
+    /// The three frames of the bracket that exposed all of this, as their own
+    /// `ShutterSpeedValue` fields hold them.
+    ///
+    /// Every one of these fails if the APEX number is copied out as seconds
+    /// instead of converted, which is what the reader used to do.
+    #[test]
+    fn an_apex_shutter_speed_is_not_a_number_of_seconds() {
+        for (apex, secs) in [
+            (0.736966f32, 0.6f32),
+            (2.584963, 1.0 / 6.0),
+            (4.643856, 0.04),
+        ] {
+            let got = apex_shutter_to_secs(apex).expect("a real shutter speed");
+            assert!(
+                (got / secs - 1.0).abs() < 0.005,
+                "APEX {apex} is {secs}s, not {got}s"
+            );
+            assert!(
+                (got - apex).abs() > secs * 0.05 || (apex - 1.0).abs() < 1e-6,
+                "APEX {apex} and {got}s are too close for this test to prove anything"
+            );
+        }
+    }
+
+    /// A second is where the scale turns over, and slower than that is negative.
+    #[test]
+    fn the_scale_runs_both_ways_around_one_second() {
+        assert!((apex_shutter_to_secs(0.0).unwrap() - 1.0).abs() < 1e-6);
+        assert!((apex_shutter_to_secs(-1.0).unwrap() - 2.0).abs() < 1e-6);
+        assert!((apex_shutter_to_secs(5.0).unwrap() - 1.0 / 32.0).abs() < 1e-6);
+    }
+
+    /// And nothing unusable comes back out of it.
+    #[test]
+    fn a_nonsense_apex_value_is_refused() {
+        assert_eq!(apex_shutter_to_secs(f32::NAN), None);
+        assert_eq!(apex_shutter_to_secs(1e30), None, "underflows to zero");
+    }
+}
+// ========== BLITZRAW END: what an APEX shutter speed is worth ==========
