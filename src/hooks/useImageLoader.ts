@@ -6,8 +6,9 @@ import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes } from '../components/ui/AppProperties';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
+import { settlePendingNudges } from '../utils/pendingNudges';
 
-export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
+export function useImageLoader(cachedEditStateRef: React.RefObject<any>, prevAdjustmentsRef: React.RefObject<any>) {
   const selectedImage = useEditorStore((s) => s.selectedImage);
   const adjustments = useEditorStore((s) => s.adjustments);
   const histogram = useEditorStore((s) => s.histogram);
@@ -24,6 +25,35 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
   const appSettings = useSettingsStore((s) => s.appSettings);
 
   const isWgpuActive = appSettings?.useWgpuRenderer !== false && selectedImage?.isReady && hasRenderedFirstFrame;
+
+  // BLITZRAW: the preview this photo has on disk, if any. Asked for on every
+  // change of photo and cleared first, so a preview is never left showing
+  // against the wrong file, and dropped silently when the answer arrives after
+  // the user has moved on.
+  useEffect(() => {
+    const path = selectedImage?.path;
+    setEditor({ cachedPreviewUrl: null });
+    if (!path) {
+      return;
+    }
+    let isEffectActive = true;
+    invoke<string | null>(Invokes.CachedPreviewForPath, { path })
+      .then((url) => {
+        if (!isEffectActive || !url) return;
+        if (useEditorStore.getState().selectedImage?.path !== path) return;
+        // BLITZRAW: something better may already be showing. This is cleared to
+        // null on every change of photo, so anything in it now was put there by
+        // the proxy render, which is this same preview with the nudge already
+        // on it. Replacing it would undo the nudge on screen and then let the
+        // real render put it back, which reads as a flicker.
+        if (useEditorStore.getState().cachedPreviewUrl !== null) return;
+        setEditor({ cachedPreviewUrl: url });
+      })
+      .catch((err) => console.error('Failed to read the cached preview:', err));
+    return () => {
+      isEffectActive = false;
+    };
+  }, [selectedImage?.path, setEditor]);
 
   useEffect(() => {
     if (selectedImage && !selectedImage.isReady && selectedImage.path) {
@@ -45,7 +75,33 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
           }
 
           setEditor({ adjustments: initialAdjusts });
-          resetHistory(initialAdjusts);
+          // BLITZRAW: the sidecar's own log, which outlives the session and
+          // holds what happened to this photo while it was closed.
+          resetHistory(initialAdjusts, metadata.history ?? null);
+          // BLITZRAW: arrow to the next photo and nudge exposure straight away
+          // and the key goes down before this read comes back. Those presses
+          // are spent here, on the values that just landed, rather than on the
+          // previous photo's. See pendingNudges.ts.
+          const spent = settlePendingNudges(selectedImage.path);
+          if (spent) {
+            // BLITZRAW: what auto-sync measures the next change against, moved
+            // past the presses that were just spent. Without this, a photo
+            // opened twice in one session can leave that reference holding its
+            // own older values, and auto-sync then reads the nudge as a change
+            // to fan out across the rest of the selection. Every other file in
+            // it has already been nudged from its own value, file by file, so
+            // that would replace each of them with this one's number.
+            //
+            // Only when something was actually spent. Setting it on every open
+            // would change when auto-sync fans out at all, which is not what
+            // this is for.
+            prevAdjustmentsRef.current = {
+              path: selectedImage.path,
+              adjustments: useEditorStore.getState().adjustments,
+              setBy: 'presses spent when a photo finished opening',
+              setAt: Date.now(),
+            };
+          }
         } catch (err) {
           console.error('Failed to load metadata early:', err);
         }
@@ -135,6 +191,7 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
     resetHistory,
     setEditor,
     setLibrary,
+    prevAdjustmentsRef,
   ]);
 
   useEffect(() => {
