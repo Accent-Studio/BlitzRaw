@@ -2622,6 +2622,19 @@ const REBUILD_MAX_WAIT: Duration = Duration::from_millis(1500);
 /// to wake it.
 const REBUILD_POLL: Duration = Duration::from_millis(60);
 
+/// How often a waiting thumbnail worker looks to see whether the editor has
+/// finished with the decoder. Short, because the wait is usually over in well
+/// under a second and workers asleep past the end of it are wasted time.
+const EDITOR_PRIORITY_POLL: Duration = Duration::from_millis(25);
+
+/// The longest a thumbnail worker will stand aside for the editor.
+///
+/// A ceiling rather than a timeout anybody should reach. An editor decode is
+/// about a second and a half at its worst, so this is generous. It exists so
+/// that a flag left set by some path nobody thought of costs a pause rather
+/// than a queue that never moves again.
+const EDITOR_PRIORITY_MAX_WAIT: Duration = Duration::from_secs(3);
+
 /// What a worker has claimed, and whether it must render rather than trust the
 /// file already in the cache.
 struct ThumbnailJob {
@@ -2968,6 +2981,32 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                 };
 
                 let state = app_clone.state::<crate::AppState>();
+
+                // ====== BLITZRAW: the photo on screen goes first ======
+                // A thumbnail four rows down is nobody's hurry. The photo being
+                // opened is somebody sitting and waiting for it, and both want
+                // the same GPU and the same decoder.
+                //
+                // So a worker that is about to start a thumbnail waits while a
+                // photo is being decoded for the editor. Checked here, before
+                // the work rather than during it, because a thumbnail already
+                // under way is nearly finished and abandoning it would only
+                // mean doing it again.
+                //
+                // Waits in short steps so that a decode which ends early is not
+                // followed by workers still asleep, and gives up after a couple
+                // of seconds so a stuck flag can never stall the queue for good.
+                {
+                    let mut waited = Duration::ZERO;
+                    while state.editor_decode_busy.load(Ordering::SeqCst)
+                        && waited < EDITOR_PRIORITY_MAX_WAIT
+                    {
+                        std::thread::sleep(EDITOR_PRIORITY_POLL);
+                        waited += EDITOR_PRIORITY_POLL;
+                    }
+                }
+                // ==== BLITZRAW END: the photo on screen goes first ====
+
                 let gpu_context =
                     crate::gpu_processing::get_or_init_gpu_context(&state, &app_clone).ok();
 

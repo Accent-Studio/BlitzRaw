@@ -50,3 +50,36 @@ export function findNearestVisible(
   }
   return null;
 }
+
+/**
+ * BLITZRAW: where the selection goes when a change is about to hide the photo
+ * it is on, or `null` when it should stay where it is.
+ *
+ * Called with the list as it will be **after** the change, before the change is
+ * written. That ordering is the whole point: deciding afterwards leaves a
+ * render in which the editor holds a photo the list no longer has, and the move
+ * that follows opens a second photo, so a single key press pays for two full
+ * decodes instead of one.
+ *
+ * Two cases deliberately do not move. A list that has filtered down to nothing
+ * is something people do on purpose to check, and jumping somewhere arbitrary
+ * on the way back would lose their place. A photo still showing after the
+ * change has not gone anywhere and does not need moving off.
+ */
+export function selectionAfterHiding(
+  fullOrder: Array<{ path: string }>,
+  visibleAfter: Array<{ path: string }>,
+  activePath: string | null,
+): string | null {
+  if (!activePath || visibleAfter.length === 0) {
+    return null;
+  }
+
+  const visible = new Set(visibleAfter.map((image) => image.path));
+  if (visible.has(activePath)) {
+    return null;
+  }
+
+  const next = findNearestVisible(fullOrder, visible, activePath);
+  return next && next !== activePath ? next : null;
+}

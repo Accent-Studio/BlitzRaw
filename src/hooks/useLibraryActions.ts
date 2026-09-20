@@ -10,6 +10,7 @@ import { Invokes, ImageFile, AlbumItem, Album, AlbumGroup } from '../components/
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
+import { selectionAfterHiding } from '../utils/filteredSelection';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
   const handleRate = useCallback((newRating: number, paths?: string[]) => {
@@ -40,13 +41,56 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       after[p] = finalRating;
     });
 
+    // ========= BLITZRAW: move on before the photo goes, not after =========
+    // Rating a photo out of the filter used to take two steps. The rating
+    // landed, the list recomputed without the photo, and only then did an
+    // effect notice the selection was pointing at something no longer in the
+    // list and move it on.
+    //
+    // Two things came out of that gap. For one render the editor held a photo
+    // that nothing else agreed was there, which is the flicker. And the move
+    // that followed opened another photo, which starts a full decode of it, so
+    // the work was done twice: once for the photo being left and once for the
+    // photo arrived at.
+    //
+    // Both happen in one update now. The new ratings decide the new list, the
+    // new list decides where the selection goes, and all of it is written at
+    // once. `useFilteredSelection` still watches for the same thing and is now
+    // a safety net rather than the mechanism, because by the time it looks the
+    // selection is already somewhere real.
+    let movedTo: string | null = null;
+
     setLibrary((state) => {
       const newRatings = { ...state.imageRatings };
       pathsToRate.forEach((p) => {
         newRatings[p] = finalRating;
       });
-      return { imageRatings: newRatings };
+
+      const update: Record<string, any> = { imageRatings: newRatings };
+
+      const next = selectionAfterHiding(
+        state.imageList,
+        computeSortedLibrary({ ...state, imageRatings: newRatings }, useSettingsStore.getState()),
+        selectedImage?.path ?? state.libraryActivePath,
+      );
+
+      if (next) {
+        update.libraryActivePath = next;
+        update.multiSelectedPaths = [next];
+        update.selectionAnchorPath = next;
+        movedTo = next;
+      }
+
+      return update;
     });
+
+    // The store move covers the grid and the filmstrip. The editor holds its
+    // own photo and has to be told, and only when it is the view being looked
+    // at: asking for the editor from the grid would open one nobody asked for.
+    if (movedTo && useUIStore.getState().activeView === 'editor' && handleImageSelect) {
+      handleImageSelect(movedTo, false);
+    }
+    // ======= BLITZRAW END: move on before the photo goes, not after =======
 
     // Nothing to take back when nothing moved, and recording it would push a
     // real change out of a bounded stack for no reason.
@@ -59,7 +103,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       console.error(err);
       toast.error(`Failed to apply rating: ${err}`);
     });
-  }, []);
+  }, [handleImageSelect]);
 
   // ============ BLITZRAW: ratings can be taken back ============
   /**
@@ -134,11 +178,39 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
 
       if (Object.keys(after).length === 0) return;
 
-      setLibrary((state) => ({ imageRatings: { ...state.imageRatings, ...after } }));
+      // BLITZRAW: the same move as setting a rating outright. Nudging a photo
+      // below the filter hides it just as surely, so the selection has to leave
+      // before the list does, for the same reasons written there.
+      let movedTo: string | null = null;
+
+      setLibrary((state) => {
+        const newRatings = { ...state.imageRatings, ...after };
+        const update: Record<string, any> = { imageRatings: newRatings };
+
+        const next = selectionAfterHiding(
+          state.imageList,
+          computeSortedLibrary({ ...state, imageRatings: newRatings }, useSettingsStore.getState()),
+          selectedImage?.path ?? state.libraryActivePath,
+        );
+
+        if (next) {
+          update.libraryActivePath = next;
+          update.multiSelectedPaths = [next];
+          update.selectionAnchorPath = next;
+          movedTo = next;
+        }
+
+        return update;
+      });
+
+      if (movedTo && useUIStore.getState().activeView === 'editor' && handleImageSelect) {
+        handleImageSelect(movedTo, false);
+      }
+
       pushRatingChange({ before, after });
       void writeRatings(after);
     },
-    [writeRatings],
+    [writeRatings, handleImageSelect],
   );
 
   const handleUndoRating = useCallback(() => {

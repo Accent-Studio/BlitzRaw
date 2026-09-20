@@ -2888,6 +2888,8 @@ pub fn run() {
             thumbnail_geometry_cache: Mutex::new(HashMap::new()),
             lens_db: Mutex::new(None),
             load_image_generation: Arc::new(AtomicUsize::new(0)),
+            editor_decode_slot: Arc::new(tokio::sync::Mutex::new(())),
+            editor_decode_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             full_warped_cache: Mutex::new(None),
             full_transformed_cache: Mutex::new(None),
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),

@@ -862,6 +862,37 @@ pub async fn load_image(
             ));
         }
 
+        // ============ BLITZRAW: one photo decodes at a time ============
+        // Wait for whatever is decoding now, and only then ask whether this
+        // request is still wanted.
+        //
+        // Deciding before the wait would decide too early: at the moment a
+        // request arrives it is always the newest one. Running through five
+        // photos puts five requests here, and by the time the second reaches
+        // the front the fifth has arrived behind it. So the second, third and
+        // fourth turn around at this line having read nothing from disk and
+        // demosaiced nothing, and the photo actually on screen is the only one
+        // that costs anything.
+        //
+        // This is also why the check is not a cancellation. A demosaic already
+        // running cannot be stopped; rawler offers no way in, and the cheapest
+        // decode is the one that never starts.
+        let _decode_slot = state.editor_decode_slot.clone().lock_owned().await;
+        if state.load_image_generation.load(Ordering::SeqCst) != my_generation {
+            return Err("Load cancelled".to_string());
+        }
+
+        /// Clears the flag however the load ends, including on an early return.
+        struct DecodeBusy(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DecodeBusy {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        state.editor_decode_busy.store(true, Ordering::SeqCst);
+        let _busy = DecodeBusy(state.editor_decode_busy.clone());
+        // ========== BLITZRAW END: one photo decodes at a time ==========
+
         let (pristine_img, exif_data_loaded) = tokio::task::spawn_blocking(move || {
             if generation_tracker.load(Ordering::SeqCst) != my_generation {
                 return Err("Load cancelled".to_string());

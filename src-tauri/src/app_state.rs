@@ -210,6 +210,28 @@ pub struct AppState {
     pub thumbnail_geometry_cache: Mutex<HashMap<String, (u64, DynamicImage, f32)>>,
     pub lens_db: Mutex<Option<Arc<LensDatabase>>>,
     pub load_image_generation: Arc<AtomicUsize>,
+    // ============ BLITZRAW: one photo decodes at a time ============
+    /// Held for the length of one editor decode.
+    ///
+    /// Opening a photo starts a full decode of it: on a Z9 that is 8256x5504
+    /// floats, about 545 MB, and roughly a second and a half. Nothing used to
+    /// stand between one of those and the next, so a cull that dropped a photo
+    /// every second started a decode every second and none of them could be
+    /// stopped once the demosaic had begun. Nine at once is five gigabytes, and
+    /// that is what ran the window out of memory.
+    ///
+    /// Waiting here rather than deciding earlier is the point. A request that
+    /// reaches the front of this queue and finds a newer one behind it is
+    /// dropped **before it decodes anything**, so running through five photos
+    /// costs one decode and four instant refusals rather than five decodes.
+    pub editor_decode_slot: Arc<tokio::sync::Mutex<()>>,
+    /// Whether a photo the user is looking at is being decoded right now.
+    ///
+    /// Read by the thumbnail workers, which stand aside while it is set. The
+    /// photo on screen is what somebody is waiting for; a thumbnail four rows
+    /// down is not.
+    pub editor_decode_busy: Arc<std::sync::atomic::AtomicBool>,
+    // ========== BLITZRAW END: one photo decodes at a time ==========
     /// BLITZRAW: which round of bulk adjustments is current.
     ///
     /// Applying adjustments across a selection writes every sidecar and then

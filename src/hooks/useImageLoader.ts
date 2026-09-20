@@ -159,6 +159,18 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>, prevAdj
             return state;
           });
         } catch (err) {
+          // BLITZRAW: a load that was overtaken is not a failure.
+          //
+          // Only one photo decodes at a time now, and a request that reaches
+          // the front of that queue with a newer one behind it turns around
+          // rather than decoding. That is the normal result of moving through
+          // photos quickly, and it arrives here as an error. Treating it as one
+          // would put a red toast on screen for every photo passed through, and
+          // the line below it would empty the editor of the photo that is
+          // actually open, which is the opposite of what the user asked for.
+          if (String(err).includes('cancelled')) {
+            return;
+          }
           if (isEffectActive) {
             console.error('Failed to load image:', err);
             toast.error(`Failed to load image: ${err}`);
