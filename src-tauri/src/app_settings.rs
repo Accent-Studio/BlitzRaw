@@ -64,6 +64,12 @@ pub struct LastFolderState {
     pub active_album_id: Option<String>,
     #[serde(default)]
     pub expanded_album_groups: Vec<String>,
+    // BLITZRAW: the photo that was current when the app was last closed, so
+    // reopening the session lands on it rather than at the top of the folder.
+    // Optional and defaulted, so a settings file written before this existed
+    // still reads.
+    #[serde(default)]
+    pub active_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -300,9 +306,26 @@ pub struct WorkspaceState {
     pub right_panel_width: u32,
     pub left_top_height: u32,
     pub right_top_height: u32,
+    /// The split inside the floating window, when it holds both its rows.
+    ///
+    /// Named fields, so a field that is not here is dropped on the way through
+    /// and the setting silently does not persist. The three maps below are maps
+    /// rather than named regions, which is why the floating regions themselves
+    /// survived without a change and this one number did not.
+    #[serde(default)]
+    pub float_top_height: Option<u32>,
     pub panel_layout: HashMap<String, Vec<String>>,
     pub active_panels: HashMap<String, Option<String>>,
     pub panel_switcher_placement: HashMap<String, String>,
+    /// BLITZRAW: where the windows sit on the desk.
+    ///
+    /// A profile described the inside of the windows and nothing about the
+    /// windows themselves, so two profiles made for two different screen
+    /// arrangements came out identical and loading either did nothing. Named
+    /// here for the reason given above: a field this struct does not list is
+    /// dropped on the way to disk, and looks saved until the app is closed.
+    #[serde(default)]
+    pub windows: Option<crate::window_places::WindowPlaces>,
 }
 
 impl Default for WorkspaceState {
@@ -347,9 +370,11 @@ impl Default for WorkspaceState {
             right_panel_width: 320,
             left_top_height: 450,
             right_top_height: 450,
+            float_top_height: None,
             panel_layout,
             active_panels,
             panel_switcher_placement,
+            windows: None,
         }
     }
 }
@@ -409,6 +434,16 @@ pub struct AppSettings {
     pub enable_live_previews: Option<bool>,
     #[serde(default)]
     pub live_preview_quality: Option<String>,
+    /// Skip the splash screen and reopen the last folder straight away.
+    #[serde(default)]
+    pub auto_continue_session: Option<bool>,
+    /// Align bracket frames before merging to HDR. Off by default: bracketing is
+    /// usually done on a tripod, where there is nothing to correct and a
+    /// mismatched estimate can only do harm. The merge confirmation carries the
+    /// toggle and writes the choice back here, so it holds from one run to the
+    /// next.
+    #[serde(default)]
+    pub hdr_auto_align: Option<bool>,
     pub sort_criteria: Option<SortCriteria>,
     pub filter_criteria: Option<FilterCriteria>,
     pub theme: Option<String>,
@@ -428,6 +463,11 @@ pub struct AppSettings {
     #[serde(default)]
     pub ai_tag_count: Option<u32>,
     pub thumbnail_size: Option<String>,
+    /// The grid's minimum cell width in pixels, which replaced the three fixed
+    /// sizes above. Kept beside the old field rather than instead of it, so a
+    /// settings file written by this build still opens in one that predates it.
+    #[serde(default)]
+    pub thumbnail_size_px: Option<u32>,
     pub thumbnail_aspect_ratio: Option<String>,
     pub ai_provider: Option<String>,
     #[serde(default = "default_adjustment_visibility")]
@@ -466,6 +506,24 @@ pub struct AppSettings {
     pub waveform_height: Option<u32>,
     #[serde(default)]
     pub active_waveform_channel: Option<String>,
+    /// The column of scopes, in order, as the Scopes panel shows them.
+    ///
+    /// Missing until now, so the column was rebuilt from one luma scope on
+    /// every start no matter what had been set up. The front end had always
+    /// sent it and read it back; nothing here kept it, and serde drops what it
+    /// has no field for, so it went out to disk and never came home.
+    #[serde(default)]
+    pub waveform_channels: Option<Vec<String>>,
+    /// How far the vectorscope's trace is pushed out from the centre. One is
+    /// no gain. See `calculate_waveform_from_image`.
+    #[serde(default)]
+    pub vectorscope_gain: Option<f32>,
+    /// The height of each scope in the column, in the column's order.
+    #[serde(default)]
+    pub scope_heights: Option<Vec<u32>>,
+    /// How many edit steps each photo keeps. A memory cost, so it is settable.
+    #[serde(default)]
+    pub history_step_limit: Option<u32>,
     #[serde(default)]
     pub use_wgpu_renderer: Option<bool>,
     #[serde(default)]
@@ -474,6 +532,16 @@ pub struct AppSettings {
     pub zoom_speed_multiplier: Option<f32>,
     #[serde(default)]
     pub keybinds: HashMap<String, Vec<String>>,
+    /// Sliders the user added to Quick Adjustments by right-clicking them.
+    /// Opaque here: the front end owns the shape, and the backend only has to
+    /// keep it, so a field added there does not need a change on this side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_adjustments: Option<serde_json::Value>,
+    /// Which sections of the Adjustments panel are left open. A preference
+    /// about the panel rather than about any photo, so it belongs here and not
+    /// in a sidecar. Opaque for the same reason as the field above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_adjustment_sections: Option<serde_json::Value>,
     #[serde(default)]
     pub thumbnail_worker_threads: Option<u32>,
     #[serde(default)]
@@ -518,6 +586,24 @@ pub struct AppSettings {
     pub always_decode_raw_thumbnails: Option<bool>,
     #[serde(default)]
     pub workspace: WorkspaceState,
+    /// Layouts the user chose to keep, by name, in the order they made them.
+    ///
+    /// Separate from `workspace`, which is the arrangement on screen and
+    /// changes as panels are dragged. These only change when asked.
+    ///
+    /// A `Vec` rather than a map so the list reads back in the order it was
+    /// built. Names are unique; saving over one replaces it in place rather
+    /// than moving it to the end.
+    #[serde(default)]
+    pub layout_profiles: Vec<LayoutProfile>,
+}
+
+/// One kept layout, with the name the user gave it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutProfile {
+    pub name: String,
+    pub workspace: WorkspaceState,
 }
 
 impl Default for AppSettings {
@@ -535,6 +621,8 @@ impl Default for AppSettings {
             use_full_dpi_rendering: Some(false),
             enable_live_previews: Some(true),
             live_preview_quality: Some("high".to_string()),
+            auto_continue_session: Some(false),
+            hdr_auto_align: Some(false),
             sort_criteria: None,
             filter_criteria: None,
             theme: Some("dark".to_string()),
@@ -552,6 +640,7 @@ impl Default for AppSettings {
             thumbnail_size: Some("small".to_string()),
             #[cfg(not(target_os = "android"))]
             thumbnail_size: Some("medium".to_string()),
+            thumbnail_size_px: None,
             thumbnail_aspect_ratio: Some("cover".to_string()),
             ai_provider: Some("cpu".to_string()),
             adjustment_visibility: default_adjustment_visibility(),
@@ -576,6 +665,10 @@ impl Default for AppSettings {
             is_waveform_visible: Some(false),
             waveform_height: Some(220),
             active_waveform_channel: Some("luma".to_string()),
+            waveform_channels: Some(vec!["luma".to_string()]),
+            vectorscope_gain: Some(1.0),
+            scope_heights: None,
+            history_step_limit: Some(100),
             #[cfg(any(target_os = "linux", target_os = "android"))]
             use_wgpu_renderer: Some(false),
             #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -583,6 +676,8 @@ impl Default for AppSettings {
             canvas_input_mode: Some("mouse".to_string()),
             zoom_speed_multiplier: Some(1.0),
             keybinds: HashMap::new(),
+            quick_adjustments: None,
+            open_adjustment_sections: None,
             #[cfg(target_os = "android")]
             thumbnail_worker_threads: Some(2),
             #[cfg(not(target_os = "android"))]
@@ -610,15 +705,14 @@ impl Default for AppSettings {
             group_preferred_type: Some("raw".to_string()),
             always_decode_raw_thumbnails: Some(false),
             workspace: WorkspaceState::default(),
+            layout_profiles: Vec::new(),
         }
     }
 }
 
 pub fn get_settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    let settings_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
+    // BLITZRAW: one data directory, chosen and proved. See data_dir.rs.
+    let settings_dir = crate::data_dir::data_dir(app_handle);
 
     if !settings_dir.exists() {
         fs::create_dir_all(&settings_dir).map_err(|e| e.to_string())?;
@@ -698,7 +792,63 @@ pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
 pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(), String> {
     let path = get_settings_path(&app_handle)?;
     let json_string = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(path, json_string).map_err(|e| e.to_string())?;
+    // ============ BLITZRAW: say that settings were written, and where ============
+    // The file on disk stopped changing at some point and nothing said so, in
+    // either direction: no error in the log and no new bytes on disk, which
+    // between them are indistinguishable from a save that is never asked for.
+    // A saved workspace, a scope column and a vectorscope gain all quietly did
+    // not persist because of it. One line each way settles which it is.
+    let bytes = json_string.len();
+    // Written to a temporary file and renamed over the real one, rather than
+    // truncated and rewritten in place. The same pattern `stacks.rs` uses, and
+    // for the same first reason: a crash halfway through leaves the old file
+    // whole instead of a half-written one.
+    //
+    // There is a second reason here. A bare `fs::write` reported success five
+    // times in one session while the file on disk kept a size and a timestamp
+    // from six days earlier. A rename is a single atomic operation on the
+    // directory rather than a truncate followed by a write, and tools that sit
+    // between a process and the disk, the sort that watch a folder and put
+    // things back, treat the two very differently.
+    let temporary = path.with_extension("json.tmp");
+    if let Err(e) = fs::write(&temporary, json_string) {
+        log::error!("Could not write settings to {}: {e}", temporary.display());
+        return Err(e.to_string());
+    }
+    if let Err(e) = fs::rename(&temporary, &path) {
+        log::error!(
+            "Could not put {} in place of {}: {e}",
+            temporary.display(),
+            path.display()
+        );
+        let _ = fs::remove_file(&temporary);
+        return Err(e.to_string());
+    }
+    // Read back rather than trust the write. `fs::write` returned Ok five times
+    // in one session while the file on disk kept a size and a timestamp from
+    // six days earlier, which is a thing that should not be possible and was
+    // not worth arguing with. If the size that comes back is not the size that
+    // went out, the write is being redirected or undone by something outside
+    // this process, and that is a different problem from a write that fails.
+    match fs::metadata(&path) {
+        Ok(meta) if meta.len() as usize == bytes => {
+            log::info!("Wrote {bytes} bytes of settings to {}", path.display());
+        }
+        Ok(meta) => {
+            log::error!(
+                "Settings write did not stick: wrote {bytes} bytes to {} but the file is {} bytes",
+                path.display(),
+                meta.len()
+            );
+        }
+        Err(e) => {
+            log::error!(
+                "Wrote {bytes} bytes of settings to {} but could not read it back: {e}",
+                path.display()
+            );
+        }
+    }
+    // ========== BLITZRAW END: say that settings were written, and where ==========
 
     let state = app_handle.state::<AppState>();
     let cache_size = settings.image_cache_size.unwrap_or(5) as usize;

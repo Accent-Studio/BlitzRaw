@@ -16,6 +16,8 @@ interface ProcessState {
   indexingProgress: Progress;
   thumbnails: Record<string, string>;
   thumbnailProgress: Progress;
+  /** BLITZRAW: building the on-disk preview cache. */
+  previewProgress: Progress;
   previews: Record<string, { url: string; thumbKey: string; timestamp: number }>;
   aiModelDownloadStatus: string | null;
   copiedFilePaths: Array<string>;
@@ -45,6 +47,7 @@ export const useProcessStore = create<ProcessState>((set, get) => ({
   indexingProgress: { current: 0, total: 0 },
   thumbnails: {},
   thumbnailProgress: { current: 0, total: 0 },
+  previewProgress: { current: 0, total: 0 },
   previews: {},
   aiModelDownloadStatus: null,
   copiedFilePaths: [],

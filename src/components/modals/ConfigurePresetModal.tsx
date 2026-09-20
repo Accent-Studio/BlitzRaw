@@ -6,12 +6,13 @@ import Text from '../ui/Text';
 import { TextVariants } from '../../types/typography';
 import Switch from '../ui/Switch';
 import { Preset } from '../ui/AppProperties';
-import { ADJUSTMENT_GROUPS } from '../../utils/adjustments';
+import { ADJUSTMENT_GROUPS, COPYABLE_ADJUSTMENT_KEYS } from '../../utils/adjustments';
+import IncludedAdjustments, { keysFromLegacyPresetFlags } from '../ui/IncludedAdjustments';
 
 interface ConfigurePresetModalProps {
   isOpen: boolean;
   onClose(): void;
-  onSave(name: string, includeMasks: boolean, includeCropTransform: boolean, presetType: 'tool' | 'style'): void;
+  onSave(name: string, includedAdjustments: Array<string>, presetType: 'tool' | 'style'): void;
   initialPreset?: Preset | null;
 }
 
@@ -102,8 +103,10 @@ const PresetTypeSwitch = ({ selectedType, onChange }: PresetTypeSwitchProps) => 
 export default function ConfigurePresetModal({ isOpen, onClose, onSave, initialPreset }: ConfigurePresetModalProps) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
-  const [includeMasks, setIncludeMasks] = useState(false);
-  const [includeCropTransform, setIncludeCropTransform] = useState(false);
+  // A full list rather than two switches, matching Copy and Paste. Anything
+  // outside masks and crop used to be decided for you, which is how lens
+  // correction ended up unreachable from a preset.
+  const [included, setIncluded] = useState<Array<string>>([...COPYABLE_ADJUSTMENT_KEYS]);
   const [presetType, setPresetType] = useState<'tool' | 'style'>('style');
   const [isMounted, setIsMounted] = useState(false);
   const [show, setShow] = useState(false);
@@ -111,16 +114,27 @@ export default function ConfigurePresetModal({ isOpen, onClose, onSave, initialP
   useEffect(() => {
     if (isOpen) {
       setName(initialPreset?.name || '');
-      setIncludeMasks(
-        initialPreset?.includeMasks ??
-          (initialPreset?.adjustments?.masks && initialPreset.adjustments.masks.length > 0) ??
-          false,
-      );
 
-      const GEOMETRY_KEYS = ADJUSTMENT_GROUPS.geometry.flatMap((group) => group.keys);
-      const hasGeometry =
-        initialPreset?.adjustments && Object.keys(initialPreset.adjustments).some((key) => GEOMETRY_KEYS.includes(key));
-      setIncludeCropTransform(initialPreset?.includeCropTransform ?? hasGeometry ?? false);
+      if (initialPreset?.includedAdjustments?.length) {
+        setIncluded(initialPreset.includedAdjustments);
+      } else if (initialPreset) {
+        // Saved before the list existed, so read its two switches back. A
+        // preset opening with nothing ticked would lose its contents on save.
+        const GEOMETRY_KEYS = ADJUSTMENT_GROUPS.geometry.flatMap((group) => group.keys);
+        const hasGeometry = !!(
+          initialPreset.adjustments &&
+          Object.keys(initialPreset.adjustments).some((key) => GEOMETRY_KEYS.includes(key))
+        );
+        const hasMasks = !!(initialPreset.adjustments?.masks && initialPreset.adjustments.masks.length > 0);
+        setIncluded(
+          keysFromLegacyPresetFlags(
+            initialPreset.includeMasks ?? hasMasks,
+            initialPreset.includeCropTransform ?? hasGeometry,
+          ),
+        );
+      } else {
+        setIncluded([...COPYABLE_ADJUSTMENT_KEYS]);
+      }
 
       setPresetType(initialPreset?.presetType || 'style');
       setIsMounted(true);
@@ -131,8 +145,7 @@ export default function ConfigurePresetModal({ isOpen, onClose, onSave, initialP
       const timer = setTimeout(() => {
         setIsMounted(false);
         setName('');
-        setIncludeMasks(false);
-        setIncludeCropTransform(false);
+        setIncluded([...COPYABLE_ADJUSTMENT_KEYS]);
         setPresetType('style');
       }, 300);
       return () => clearTimeout(timer);
@@ -141,10 +154,10 @@ export default function ConfigurePresetModal({ isOpen, onClose, onSave, initialP
 
   const handleSave = useCallback(() => {
     if (name.trim()) {
-      onSave(name.trim(), includeMasks, includeCropTransform, presetType);
+      onSave(name.trim(), included, presetType);
       onClose();
     }
-  }, [name, includeMasks, includeCropTransform, presetType, onSave, onClose]);
+  }, [name, included, presetType, onSave, onClose]);
 
   const handleKeyDown = useCallback(
     (e: any) => {
@@ -175,7 +188,7 @@ export default function ConfigurePresetModal({ isOpen, onClose, onSave, initialP
     >
       <div
         className={`
-          bg-surface rounded-lg shadow-xl p-6 w-full max-w-sm
+          bg-surface rounded-lg shadow-xl p-6 w-full max-w-3xl
           transform transition-all duration-300 ease-out
           ${show ? 'scale-100 opacity-100 translate-y-0' : 'scale-95 opacity-0 -translate-y-4'}
         `}
@@ -194,14 +207,13 @@ export default function ConfigurePresetModal({ isOpen, onClose, onSave, initialP
           value={name}
         />
 
-        <div className="mt-5 mb-4 p-1 space-y-4">
-          <Switch label={t('modals.configurePreset.includeMasks')} checked={includeMasks} onChange={setIncludeMasks} />
-          <Switch
-            label={t('modals.configurePreset.includeCropTransform')}
-            checked={includeCropTransform}
-            onChange={setIncludeCropTransform}
-          />
-        </div>
+        <IncludedAdjustments
+          className="mt-5 mb-4"
+          gridHeightClass="max-h-[26rem]"
+          title={t('modals.configurePreset.includedAdjustments')}
+          selected={included}
+          onChange={setIncluded}
+        />
 
         <PresetTypeSwitch selectedType={presetType} onChange={setPresetType} />
 

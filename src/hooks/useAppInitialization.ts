@@ -3,10 +3,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useUIStore } from '../store/useUIStore';
+import { usableWorkspace } from '../utils/panelLayout';
+import { usableStepLimit } from '../utils/editHistory';
+import { currentWorkspaceDefaults } from '../utils/workspaceDefaults';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useProcessStore } from '../store/useProcessStore';
-import { THEMES, DEFAULT_THEME_ID, ThemeProps } from '../utils/themes';
+import { DEFAULT_THEME_ID, applyTheme } from '../utils/themes';
 import { COPYABLE_ADJUSTMENT_KEYS } from '../utils/adjustments';
 import {
   FilterCriteria,
@@ -15,15 +18,19 @@ import {
   RawStatus,
   EditedStatus,
   Theme,
-  ThumbnailSize,
+  LEGACY_THUMBNAIL_SIZES,
+  THUMBNAIL_SIZE_DEFAULT,
+  THUMBNAIL_SIZE_DEFAULT_ANDROID,
+  THUMBNAIL_SIZE_MAX,
+  THUMBNAIL_SIZE_MIN,
   ThumbnailAspectRatio,
 } from '../components/ui/AppProperties';
 import { useTranslation } from 'react-i18next';
 
 interface UseAppInitializationProps {
   preloadedDataRef: React.RefObject<any>;
-  thumbnailSize: ThumbnailSize;
-  setThumbnailSize: (size: ThumbnailSize) => void;
+  thumbnailSize: number;
+  setThumbnailSize: (size: number) => void;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   setThumbnailAspectRatio: (ratio: ThumbnailAspectRatio) => void;
   libraryViewMode: LibraryViewMode;
@@ -93,6 +100,7 @@ export const useAppInitialization = ({
       rightPanelWidth: state.rightPanelWidth,
       leftTopHeight: state.leftTopHeight,
       rightTopHeight: state.rightTopHeight,
+      floatTopHeight: state.floatTopHeight,
       panelLayout: state.panelLayout,
       activePanels: state.activePanels,
       panelSwitcherPlacement: state.panelSwitcherPlacement,
@@ -130,7 +138,7 @@ export const useAppInitialization = ({
   );
 
   const isAndroid = osPlatform === 'android';
-  const defaultThumbnailSize = isAndroid ? ThumbnailSize.Small : ThumbnailSize.Medium;
+  const defaultThumbnailSize = isAndroid ? THUMBNAIL_SIZE_DEFAULT_ANDROID : THUMBNAIL_SIZE_DEFAULT;
   const defaultLibraryViewMode = isAndroid ? LibraryViewMode.Recursive : LibraryViewMode.Flat;
   const prevImageCountsNeed = useRef<boolean | undefined>(undefined);
 
@@ -190,24 +198,58 @@ export const useAppInitialization = ({
           setUI((state) => ({ uiVisibility: { ...state.uiVisibility, ...settings.uiVisibility } }));
         }
 
+        // Merged over the defaults rather than replacing them, so a section
+        // added later opens as it was meant to instead of as missing.
+        if (settings?.openAdjustmentSections) {
+          setUI((state) => ({
+            collapsibleSectionsState: {
+              ...state.collapsibleSectionsState,
+              ...settings.openAdjustmentSections,
+            },
+          }));
+        }
+
         if (settings?.workspace) {
-          setUI({
-            leftPanelWidth: settings.workspace.leftPanelWidth,
-            rightPanelWidth: settings.workspace.rightPanelWidth,
-            leftTopHeight: settings.workspace.leftTopHeight,
-            rightTopHeight: settings.workspace.rightTopHeight,
-            panelLayout: settings.workspace.panelLayout,
-            activePanels: settings.workspace.activePanels,
-            panelSwitcherPlacement: settings.workspace.panelSwitcherPlacement,
-          });
+          // Merged over the defaults rather than replacing them. A saved
+          // workspace is a complete layout, so a panel added since it was
+          // written is in the defaults, absent from the file, and invisible
+          // once the file is applied. See reconcilePanelLayout.
+          setUI(usableWorkspace(settings.workspace, currentWorkspaceDefaults()) as any);
+          // BLITZRAW: and then the left side, by the rule rather than by what
+          // was open at the last close. This has to be after the line above,
+          // which carries a saved `activePanels` with it. Without it the app
+          // opens in the grid showing the history of a photo you are no longer
+          // looking at, which is what it used to do.
+          useUIStore.getState().showLeftPanelForView(useUIStore.getState().activeView);
         }
 
         if (settings?.isWaveformVisible !== undefined) setEditor({ isWaveformVisible: settings.isWaveformVisible });
         if (settings?.activeWaveformChannel) setEditor({ activeWaveformChannel: settings.activeWaveformChannel });
+        // A settings file written before the column existed carries one
+        // channel; it becomes a column of one rather than an empty panel.
+        setEditor({
+          waveformChannels: settings?.waveformChannels?.length
+            ? settings.waveformChannels
+            : [settings?.activeWaveformChannel || 'luma'],
+        });
         if (typeof settings?.waveformHeight === 'number') setEditor({ waveformHeight: settings.waveformHeight });
+        if (typeof settings?.vectorscopeGain === 'number') setEditor({ vectorscopeGain: settings.vectorscopeGain });
+        if (Array.isArray(settings?.scopeHeights)) setEditor({ scopeHeights: settings.scopeHeights });
+        if (typeof settings?.historyStepLimit === 'number')
+          setEditor({ historyStepLimit: usableStepLimit(settings.historyStepLimit) });
 
         setLibraryViewMode(settings?.libraryViewMode ?? defaultLibraryViewMode);
-        setThumbnailSize(settings?.thumbnailSize ?? defaultThumbnailSize);
+        // A settings file written before the slider carries a name rather than
+        // a number, so it is read once and then only the number is kept.
+        const savedThumbnailPx =
+          typeof settings?.thumbnailSizePx === 'number'
+            ? settings.thumbnailSizePx
+            : LEGACY_THUMBNAIL_SIZES[settings?.thumbnailSize as string];
+        setThumbnailSize(
+          savedThumbnailPx
+            ? Math.min(THUMBNAIL_SIZE_MAX, Math.max(THUMBNAIL_SIZE_MIN, savedThumbnailPx))
+            : defaultThumbnailSize,
+        );
         if (settings?.thumbnailAspectRatio) setThumbnailAspectRatio(settings.thumbnailAspectRatio);
 
         if (settings?.pinnedFolders && settings.pinnedFolders.length > 0) {
@@ -271,7 +313,7 @@ export const useAppInitialization = ({
         setAppSettings({
           lastRootPath: null,
           theme: DEFAULT_THEME_ID as Theme,
-          thumbnailSize: defaultThumbnailSize,
+          thumbnailSizePx: defaultThumbnailSize,
           libraryViewMode: defaultLibraryViewMode,
         });
       })
@@ -319,8 +361,8 @@ export const useAppInitialization = ({
 
   useEffect(() => {
     if (isInitialMount.current || !appSettings) return;
-    if (appSettings.thumbnailSize !== thumbnailSize) {
-      handleSettingsChange({ ...appSettings, thumbnailSize });
+    if (appSettings.thumbnailSizePx !== thumbnailSize) {
+      handleSettingsChange({ ...appSettings, thumbnailSizePx: thumbnailSize });
     }
   }, [thumbnailSize, appSettings, handleSettingsChange]);
 
@@ -387,10 +429,62 @@ export const useAppInitialization = ({
           expandedFolders: currentExpanded,
           activeAlbumId,
           expandedAlbumGroups: currentExpandedAlbums,
+          // BLITZRAW: carried through, because this write replaces the whole
+          // object and would otherwise drop the remembered photo every time a
+          // folder was opened or a tree branch was twirled.
+          activePath:
+            useLibraryStore.getState().libraryActivePath ?? (prevFolderState as any).activePath ?? null,
         },
       });
     }
   }, [currentFolderPath, expandedFolders, activeAlbumId, expandedAlbumGroups, appSettings, handleSettingsChange]);
+
+  // ============ BLITZRAW: the photo I was on when I closed the app ============
+  // Kept apart from the folder write above, and put off for a moment, because
+  // walking a shoot with the arrow keys changes the current photo many times a
+  // second and the settings file is rewritten whole on every save. Writing on
+  // each press would put the entire file through the disk hundreds of times in
+  // one cull.
+  //
+  // The write reads the newest settings rather than the ones this effect closed
+  // over. Both this and the folder write touch `lastFolderState`, and either
+  // can be the later of the two.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const write = (path: string) => {
+      const { appSettings: latest, handleSettingsChange: save } = useSettingsStore.getState();
+      if (!latest) return;
+      if ((latest.lastFolderState?.activePath ?? null) === path) return;
+      save({
+        ...latest,
+        lastFolderState: {
+          ...(latest.lastFolderState || {}),
+          activePath: path,
+        },
+      } as any);
+    };
+
+    const unsubscribe = useLibraryStore.subscribe((state, prev) => {
+      if (state.libraryActivePath === prev.libraryActivePath) return;
+      const path = state.libraryActivePath;
+      // Leaving a folder clears the current photo before the next folder has
+      // one. Forgetting on that would mean every folder change threw away the
+      // answer, and reopening the app would land at the top of the list.
+      if (!path) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        write(path);
+      }, 1500);
+    });
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe();
+    };
+  }, []);
+  // ========== BLITZRAW END: the photo I was on when I closed the app ==========
 
   useEffect(() => {
     if (!appSettings) return;
@@ -459,26 +553,9 @@ export const useAppInitialization = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appSettings?.enableFolderImageCounts, appSettings?.folderTreeSort?.key]);
 
+  // The body of this moved to `applyTheme`, unchanged, so that a detached
+  // panel window can paint itself with the same one call. See themes.ts.
   useEffect(() => {
-    const root = document.documentElement;
-    const currentThemeId = theme || DEFAULT_THEME_ID;
-
-    const baseTheme =
-      THEMES.find((t: ThemeProps) => t.id === currentThemeId) ||
-      THEMES.find((t: ThemeProps) => t.id === DEFAULT_THEME_ID);
-    if (!baseTheme) return;
-
-    let finalCssVariables: any = { ...baseTheme.cssVariables };
-
-    Object.entries(finalCssVariables).forEach(([key, value]) => {
-      root.style.setProperty(key, value as string);
-    });
-
-    const fontFamily = appSettings?.fontFamily || 'poppins';
-    const fontStack =
-      fontFamily === 'system'
-        ? '-apple-system, BlinkMacSystemFont, system-ui, sans-serif'
-        : "'Poppins', system-ui, sans-serif";
-    root.style.setProperty('--font-family', fontStack);
+    applyTheme(theme, appSettings?.fontFamily || 'poppins');
   }, [theme, appSettings?.fontFamily]);
 };

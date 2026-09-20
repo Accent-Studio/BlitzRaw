@@ -133,11 +133,21 @@ fn file_stem_for(path_str: &str) -> String {
     let variant = path_str.split("?vc=").nth(1);
     let mut stem: String = base
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if let Some(v) = variant {
         stem.push_str("_vc");
-        stem.push_str(&v.chars().filter(|c| c.is_alphanumeric()).collect::<String>());
+        stem.push_str(
+            &v.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>(),
+        );
     }
     stem
 }
@@ -181,7 +191,12 @@ fn identity_in_folder(path_str: &str) -> String {
 
 /// Everything a preview depends on, hashed. Anything left out of here is a way
 /// for the cache to show a picture that is no longer true.
-fn cache_key(path_str: &str, adjustments_bytes: &[u8], width: u32, kind: PreviewKind) -> Option<String> {
+fn cache_key(
+    path_str: &str,
+    adjustments_bytes: &[u8],
+    width: u32,
+    kind: PreviewKind,
+) -> Option<String> {
     let (source, _) = parse_virtual_path(path_str);
     let meta = fs::metadata(&source).ok()?;
     let modified = meta
@@ -365,9 +380,14 @@ fn build_one_preview(
 
     let state = app_handle.state::<AppState>();
     let gpu_context = gpu_processing::get_or_init_gpu_context(&state, app_handle).ok();
-    let rendered =
-        generate_thumbnail_data(path_str, gpu_context.as_ref(), None, app_handle, Some(width))
-            .map_err(|e| format!("{path_str}: {e}"))?;
+    let rendered = generate_thumbnail_data(
+        path_str,
+        gpu_context.as_ref(),
+        None,
+        app_handle,
+        Some(width),
+    )
+    .map_err(|e| format!("{path_str}: {e}"))?;
 
     store_rendered_preview(path_str, &rendered, width).map(Some)
 }
@@ -400,7 +420,12 @@ pub async fn build_previews_for_paths(
     app_handle: AppHandle,
 ) -> Result<BuildPreviewsResult, String> {
     if paths.is_empty() {
-        return Ok(BuildPreviewsResult { built: 0, skipped: 0, failed: 0, first_error: None });
+        return Ok(BuildPreviewsResult {
+            built: 0,
+            skipped: 0,
+            failed: 0,
+            first_error: None,
+        });
     }
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -415,7 +440,10 @@ pub async fn build_previews_for_paths(
         let failed = AtomicUsize::new(0);
         let first_error = std::sync::Mutex::new(None::<String>);
 
-        let _ = app_handle.emit("preview-build-progress", PreviewProgress { current: 0, total });
+        let _ = app_handle.emit(
+            "preview-build-progress",
+            PreviewProgress { current: 0, total },
+        );
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
@@ -440,11 +468,18 @@ pub async fn build_previews_for_paths(
                     }
                 }
                 let current = done.fetch_add(1, Ordering::Relaxed) + 1;
-                let _ = app_handle.emit("preview-build-progress", PreviewProgress { current, total });
+                let _ =
+                    app_handle.emit("preview-build-progress", PreviewProgress { current, total });
             });
         });
 
-        let _ = app_handle.emit("preview-build-progress", PreviewProgress { current: 0, total: 0 });
+        let _ = app_handle.emit(
+            "preview-build-progress",
+            PreviewProgress {
+                current: 0,
+                total: 0,
+            },
+        );
 
         Ok(BuildPreviewsResult {
             built: built.load(Ordering::Relaxed),
@@ -584,8 +619,14 @@ mod tests {
         let original = file_stem_for("D:/photos/_DSC1.dng");
         let copy = file_stem_for("D:/photos/_DSC1.dng?vc=2");
         assert_ne!(original, copy);
-        assert!(!copy.contains('?'), "a file name cannot carry the vc marker: {copy}");
-        assert!(!copy.contains('='), "a file name cannot carry the vc marker: {copy}");
+        assert!(
+            !copy.contains('?'),
+            "a file name cannot carry the vc marker: {copy}"
+        );
+        assert!(
+            !copy.contains('='),
+            "a file name cannot carry the vc marker: {copy}"
+        );
     }
 
     #[test]
@@ -596,7 +637,10 @@ mod tests {
         let path = file.to_string_lossy().to_string();
 
         let base = cache_key(&path, b"{}", 1920, PreviewKind::Preview).unwrap();
-        assert_eq!(base, cache_key(&path, b"{}", 1920, PreviewKind::Preview).unwrap());
+        assert_eq!(
+            base,
+            cache_key(&path, b"{}", 1920, PreviewKind::Preview).unwrap()
+        );
 
         assert_ne!(
             base,
@@ -634,7 +678,11 @@ mod tests {
         fs::write(cache.join("b.dng__0123456789abcdef.jpg"), b"someone else").unwrap();
 
         let found = existing_previews_for(&path, PreviewKind::Preview);
-        assert_eq!(found.len(), 2, "both keys for a.dng, and nothing belonging to b.dng");
+        assert_eq!(
+            found.len(),
+            2,
+            "both keys for a.dng, and nothing belonging to b.dng"
+        );
     }
 
     #[test]
@@ -650,9 +698,10 @@ mod tests {
         let stale = cache.join("a.dng__0123456789abcdef.jpg");
         fs::write(&stale, b"old").unwrap();
 
-        let rendered = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(400, 300, |x, y| {
-            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
-        }));
+        let rendered =
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(400, 300, |x, y| {
+                image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+            }));
         let written = store_rendered_preview(&path, &rendered, 200).unwrap();
 
         assert!(written.exists(), "the new preview is on disk");
@@ -665,7 +714,10 @@ mod tests {
 
         let decoded = image::open(&written).unwrap();
         assert_eq!(decoded.width(), 200, "stored at the width it was asked for");
-        assert!(!written.with_extension("jpg.part").exists(), "no part file left behind");
+        assert!(
+            !written.with_extension("jpg.part").exists(),
+            "no part file left behind"
+        );
     }
 
     #[test]
@@ -728,7 +780,12 @@ mod blitzraw_portable_preview_tests {
         // And the things a preview really does depend on still move it.
         assert_ne!(
             one,
-            cache_key(&here.to_string_lossy(), b"{\"exposure\":1}", 1920, PreviewKind::Preview),
+            cache_key(
+                &here.to_string_lossy(),
+                b"{\"exposure\":1}",
+                1920,
+                PreviewKind::Preview
+            ),
             "an edit has to make a new preview"
         );
         assert_ne!(

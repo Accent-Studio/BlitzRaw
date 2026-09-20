@@ -2,10 +2,24 @@ import React, { useCallback, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import debounce from 'lodash.debounce';
 import { useEditorStore } from '../store/useEditorStore';
-import { useUIStore } from '../store/useUIStore';
+import { isPanelShowing, useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { Adjustments, COPYABLE_ADJUSTMENT_KEYS } from '../utils/adjustments';
+import { EDIT_RULE } from '../utils/imageStacking';
+import { selectionFor } from '../utils/selection';
+import { Adjustments, COPYABLE_ADJUSTMENT_KEYS, DisplayMode } from '../utils/adjustments';
+import { PendingSync, autoSyncPlan, sameTargets, syncDelta } from '../utils/autoSync';
+import { changedKeys } from '../utils/editHistory';
+import { uncroppedPreviewNeedsRedraw } from '../utils/cropPreview';
+import { actionForChange, closeAction } from '../utils/currentAction';
+import { recordAppAction, recordingFinished, recordingStarted } from '../utils/appHistory';
+import { nameForKeys } from '../utils/historyNames';
+import { mergeScopeRequests, scopeName, scopeToken } from '../utils/scopeRequest';
+import { useScopeSource } from './useScopeSource';
+import { FLOATING_REGIONS } from '../utils/floatingLayout';
+
+/** The four regions that are drawn in the main window. */
+const SIDEBAR_REGIONS = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'] as const;
 import { Invokes, Panel } from '../components/ui/AppProperties';
 import { debouncedSave } from './useEditorActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
@@ -24,13 +38,60 @@ export function useImageProcessing(
   const selectedImage = useEditorStore((state) => state.selectedImage);
   const adjustments = useEditorStore((state) => state.adjustments);
   const previewOverride = useEditorStore((state) => state.previewOverride);
-  const isWaveformVisible = useEditorStore((state) => state.isWaveformVisible);
-  const activeWaveformChannel = useEditorStore((state) => state.activeWaveformChannel);
+  // The scopes are a panel now, and may be in a window of their own, so what
+  // decides whether the backend computes a waveform is whether anyone is
+  // looking at one: this window's layout, or a detached window that said so.
+  // Split, because the two columns are different columns. The sidebar's is in
+  // this window's own store; the floating one is reported by the window showing
+  // it. Both are known here, since the main window owns the whole layout, so
+  // whether a scope is being looked at is answered without waiting to be told.
+  const scopesInSidebar = useUIStore((state) =>
+    SIDEBAR_REGIONS.some((region) => state.activePanels[region] === Panel.Scopes),
+  );
+  const scopesFloating = useUIStore((state) =>
+    FLOATING_REGIONS.some((region) => state.activePanels[region] === Panel.Scopes),
+  );
+  const scopesInLayout = scopesInSidebar;
+  const detachedScopeChannels = useUIStore((state) => state.detachedScopeChannels);
+  const ownScopeChannels = useEditorStore((state) => state.waveformChannels);
+  const vectorscopeGain = useEditorStore((state) => state.vectorscopeGain);
+  const isWaveformVisible = scopesInSidebar || scopesFloating;
+  // The union of both columns: one pass fills whatever is asked for, so
+  // computing a scope twice would be the same work again. Never empty while
+  // something is wanted, because the backend reads an empty list as "all of
+  // them" and would quietly compute five scopes to show one.
+  //
+  // The vectorscope's gain rides in its own name, `vectorscope:3`, because the
+  // request is the only thing that travels the whole way to the backend. The
+  // detached window sends its column already written that way. See
+  // scopeRequest.ts.
+  const activeWaveformChannel = useMemo(() => {
+    if (!isWaveformVisible) return '';
+    const own = scopesInLayout
+      ? ownScopeChannels.map((mode) =>
+          scopeName(mode) === DisplayMode.Vectorscope ? scopeToken(DisplayMode.Vectorscope, vectorscopeGain) : mode,
+        )
+      : [];
+    return mergeScopeRequests(own, scopesFloating ? detachedScopeChannels : null) || 'luma';
+  }, [isWaveformVisible, scopesInLayout, scopesFloating, ownScopeChannels, detachedScopeChannels, vectorscopeGain]);
+  // BLITZRAW: the scopes follow the pointer, and fall back to the preview or
+  // the thumbnail rather than waiting on a decode. Called from here because
+  // this is where the request string is already worked out, and this hook is
+  // mounted in every view rather than only in the editor.
+  useScopeSource(activeWaveformChannel, isWaveformVisible);
+
   const displaySize = useEditorStore((state) => state.displaySize);
   const baseRenderSize = useEditorStore((state) => state.baseRenderSize);
   const originalSize = useEditorStore((state) => state.originalSize);
   const showOriginal = useEditorStore((state) => state.showOriginal);
   const isSliderDragging = useEditorStore((state) => state.isSliderDragging);
+  // BLITZRAW: the backend has the decode. See the crop preview effect below.
+  const isBackendReady = useEditorStore((state) => state.isBackendReady);
+  // BLITZRAW: the crop panel is the one its sidebar is showing. Asking the
+  // global `activePanel` meant the left sidebar could turn the crop tool off by
+  // changing what it showed. See `isPanelShowing` in useUIStore.
+  const isCropShowing = useUIStore((state) => isPanelShowing(state.activePanels, Panel.Crop));
+  const isSliderTyping = useEditorStore((state) => state.isSliderTyping);
   const transformedOriginalUrl = useEditorStore((state) => state.transformedOriginalUrl);
   const setEditor = useEditorStore((state) => state.setEditor);
 
@@ -38,6 +99,40 @@ export function useImageProcessing(
   const activePanel = useUIStore((state) => state.activePanel);
   const appSettings = useSettingsStore((state) => state.appSettings);
   const multiSelectedPaths = useLibraryStore((state) => state.multiSelectedPaths);
+
+  // How long a run of adjustments has to settle before the rest of the
+  // selection is told about it. Each fan-out is a decode and a render per file,
+  // so six nudges across twenty photos is a hundred and twenty decodes where
+  // twenty would do. Long enough to swallow a run of key presses, short enough
+  // that letting go of a slider feels like it took effect.
+  const AUTO_SYNC_DELAY_MS = 700;
+
+  /// BLITZRAW: and the longest it may ever be put off.
+  ///
+  /// The delay above is a trailing one, restarted by every call, and the effect
+  /// that calls it re-runs on a dozen things that are not edits: a slider being
+  /// touched, the scopes changing what they ask for, the view changing, the
+  /// selection changing. So while the user was working it could be pushed out
+  /// indefinitely, and everything done in that window piled into one change
+  /// waiting to be sent. A crop made on seven photos was still waiting when two
+  /// hundred were selected.
+  ///
+  /// A ceiling means a change is never held for longer than this, whatever else
+  /// is happening. See utils/autoSync.ts.
+  const AUTO_SYNC_MAX_WAIT_MS = 1500;
+
+  const pendingSyncRef = useRef<PendingSync | null>(null);
+  /**
+   * BLITZRAW: the adjustments this effect last saw, and whose photo they were.
+   *
+   * Only used to work out which adjustments moved, so a run of presses on one
+   * slider is recognised as one thing the user did. Keyed to a photo, because a
+   * state left over from the previous one would report every difference between
+   * two photos as a change somebody had just made. See utils/actionId.ts.
+   */
+  const lastSeenAdjustmentsRef = useRef<{ path: string; adjustments: Adjustments } | null>(null);
+  /** The last history move this hook has seen, so a repeat is not read as one. */
+  const lastHistoryMoveRef = useRef<number | null>(null);
 
   const inFlightCountRef = useRef(0);
   const pendingApplyRef = useRef<{ adjustments: Adjustments; targetRes?: number } | null>(null);
@@ -50,6 +145,115 @@ export function useImageProcessing(
   useEffect(() => {
     selectedImagePathRef.current = selectedImage?.path ?? null;
   }, [selectedImage?.path]);
+
+  // Sent once, when the run stops. Everything in the delta is an absolute
+  // value rather than an increment, so this is idempotent: a batch the next one
+  // supersedes has lost nothing, which is what makes it safe for the backend to
+  // abandon a superseded render pass.
+  const flushAutoSync = useMemo(
+    () =>
+      debounce(() => {
+        const pending = pendingSyncRef.current;
+        pendingSyncRef.current = null;
+        if (!pending) {
+          return;
+        }
+
+        // Exactly what the user ticked, and nothing subtracted from it. A crop
+        // travels if Crop and Aspect Ratio is ticked, because that is what the
+        // tick is for. Deciding here that geometry is too dangerous to send
+        // would be overruling a choice the user made deliberately.
+        const includedKeys =
+          useSettingsStore.getState().appSettings?.copyPasteSettings?.includedAdjustments ||
+          COPYABLE_ADJUSTMENT_KEYS;
+
+        const delta = syncDelta(prevAdjustmentsRef.current, pending, includedKeys);
+
+        // Advanced here rather than when the edit happened, so a whole run is
+        // measured from where it started rather than from its last fragment.
+        prevAdjustmentsRef.current = {
+          path: pending.path,
+          adjustments: pending.adjustments,
+          setBy: 'a fan-out',
+          setAt: Date.now(),
+        };
+
+        if (Object.keys(delta).length === 0) {
+          return;
+        }
+
+        // ============ BLITZRAW: say what is about to be written ============
+        // A crop meant for seven photos reached two hundred, and neither of the
+        // two explanations that fit the code fits what actually happened. The
+        // value that spread was the centred rectangle from the instant the
+        // ratio was clicked, not any of the framings set by hand afterwards, so
+        // it is a state that was held rather than a reference that went stale.
+        //
+        // This program's own rule is to read the log before theorising. There
+        // was nothing in it about a fan-out, so the next one leaves a record:
+        // what is going out, to how many files, and how old the reference it
+        // was measured against is.
+        const referenceAge = prevAdjustmentsRef.current?.setAt
+          ? `${Math.round((Date.now() - prevAdjustmentsRef.current.setAt) / 1000)}s ago`
+          : 'never set';
+        console.info(
+          `[auto-sync] sending ${Object.keys(delta).join(', ')} to ${pending.paths.length} photos ` +
+            `as ${pending.actionId ?? 'no action'} ` +
+            `from ${pending.path}; reference set by ${prevAdjustmentsRef.current?.setBy ?? 'nothing'} ${referenceAge}`,
+          Object.fromEntries(
+            Object.entries(delta).map(([key, value]) => [key, JSON.stringify(value)?.slice(0, 120)]),
+          ),
+        );
+        // ========== BLITZRAW END: say what is about to be written ==========
+        pending.paths.forEach((p) => globalImageCache.delete(p));
+        recordingStarted();
+        invoke(Invokes.ApplyAdjustmentsToPaths, {
+          paths: pending.paths,
+          adjustments: delta,
+          // BLITZRAW: see the paste path. The open photo is the editor's.
+          skipHistoryFor: pending.path ?? null,
+          // BLITZRAW: the name that ties these photos to the one in the editor,
+          // so an undo can find every file this action wrote.
+          historyAction: pending.actionId ?? null,
+        })
+          .then((photos: any) => {
+            // BLITZRAW: the same action, now that its other photos have
+            // reported which numbers they moved between.
+            recordAppAction({
+              id: pending.actionId,
+              kind: 'adjustments',
+              label: nameForKeys(Object.keys(delta)),
+              photos: photos ?? [],
+              selection: [pending.path, ...pending.paths],
+              openPath: pending.path,
+              inEditor: true,
+            });
+          })
+          .catch((err) => {
+            console.error('Failed to apply adjustments to multi-selection:', err);
+          })
+          .finally(recordingFinished);
+      }, AUTO_SYNC_DELAY_MS, { maxWait: AUTO_SYNC_MAX_WAIT_MS }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  // Anything that changes which photo is open sends what is waiting first, or a
+  // run of adjustments would be lost by walking away from it.
+  //
+  // BLITZRAW: and anything that changes which photos are selected, for the
+  // opposite reason: what is waiting must reach the photos it was aimed at
+  // before the selection it was aimed at stops existing. Keyed on the
+  // membership rather than the array, which is rebuilt on every library write.
+  const selectionKey = useMemo(() => [...multiSelectedPaths].sort().join('\n'), [multiSelectedPaths]);
+  useEffect(() => {
+    return () => {
+      flushAutoSync.flush();
+      // BLITZRAW: after the flush, never before it. What was waiting still
+      // belongs to the action it was made under; what comes next does not.
+      closeAction();
+    };
+  }, [selectedImage?.path, selectionKey, flushAutoSync]);
 
   const geometricAdjustmentsKey = useMemo(() => {
     if (!adjustments) return '';
@@ -303,15 +507,46 @@ export function useImageProcessing(
     [selectedImage?.isReady, flushPipeline, executeApplyAdjustments],
   );
 
+  // ============ BLITZRAW: one at a time, and the newest wins ============
+  // This fired the render straight away, every time, with nothing counting how
+  // many were already running. Each one is a GPU pass over the whole frame and
+  // each spawns its own thread on the other side holding its own copy of the
+  // image, so a rotation drag piled up 57 of them in nine seconds. They got
+  // slower as they went, from 0.3s to 4.2s, because they were all fighting over
+  // the same GPU, and the memory went with them. That is the freeze.
+  //
+  // The same shape as the pipeline `applyAdjustments` already uses: one in
+  // flight, and a request arriving while one is running replaces whatever was
+  // waiting rather than joining a queue. Everything sent is a whole state rather
+  // than a change, so dropping a superseded one loses nothing.
+  const uncroppedInFlightRef = useRef(false);
+  const pendingUncroppedRef = useRef<Adjustments | null>(null);
+
+  const flushUncroppedPreview = useCallback(() => {
+    if (uncroppedInFlightRef.current) return;
+    const next = pendingUncroppedRef.current;
+    if (!next) return;
+    pendingUncroppedRef.current = null;
+    uncroppedInFlightRef.current = true;
+    invoke(Invokes.GenerateUncroppedPreview, { jsAdjustments: next })
+      .catch((err) => console.error('Failed to generate uncropped preview:', err))
+      .finally(() => {
+        uncroppedInFlightRef.current = false;
+        if (pendingUncroppedRef.current) {
+          flushUncroppedPreview();
+        }
+      });
+  }, []);
+
   const generateUncroppedPreview = useCallback(
     (currentAdjustments: Adjustments) => {
       if (!selectedImage?.isReady) return;
-      invoke(Invokes.GenerateUncroppedPreview, { jsAdjustments: currentAdjustments }).catch((err) =>
-        console.error('Failed to generate uncropped preview:', err),
-      );
+      pendingUncroppedRef.current = currentAdjustments;
+      flushUncroppedPreview();
     },
-    [selectedImage?.isReady],
+    [selectedImage?.isReady, flushUncroppedPreview],
   );
+  // ========== BLITZRAW END: one at a time, and the newest wins ==========
 
   const calculateTargetRes = useCallback(() => {
     const baseTargetRes = appSettings?.editorPreviewResolution || 1920;
@@ -380,11 +615,34 @@ export function useImageProcessing(
     [setEditor],
   );
 
+  // BLITZRAW: `isReady` says the front end has something to draw, which on a
+  // photo opened from the grid is true a second or two before the backend has
+  // decoded anything. Asking then is answered with "No original image loaded",
+  // the uncropped preview never arrives, and the crop rectangle never appears.
+  // Nothing retried, because the thing being waited on was a ref and a ref
+  // cannot wake an effect. Now it is store state, so this runs again the moment
+  // the decode lands.
+  // BLITZRAW: what this photo was last drawn as, so a change it cannot show is
+  // not drawn again. Keyed to the photo, or the first sight of the next one
+  // would be compared against the last one's state.
+  const uncroppedDrawnRef = useRef<{ path: string; adjustments: Adjustments } | null>(null);
   useEffect(() => {
-    if (activeView === 'editor' && activePanel === Panel.Crop && selectedImage?.isReady) {
-      generateUncroppedPreview(adjustments);
+    if (!(activeView === 'editor' && isCropShowing && selectedImage?.isReady && isBackendReady)) {
+      return;
     }
-  }, [activeView, adjustments, activePanel, selectedImage?.isReady, generateUncroppedPreview]);
+    // Moving the crop rectangle is the commonest thing to do in this panel and
+    // it changes nothing about the picture underneath it, which is drawn without
+    // the crop. See utils/cropPreview.ts.
+    const drawn =
+      uncroppedDrawnRef.current?.path === selectedImage.path
+        ? uncroppedDrawnRef.current.adjustments
+        : null;
+    if (!uncroppedPreviewNeedsRedraw(drawn, adjustments)) {
+      return;
+    }
+    uncroppedDrawnRef.current = { path: selectedImage.path, adjustments };
+    generateUncroppedPreview(adjustments);
+  }, [activeView, adjustments, isCropShowing, selectedImage?.isReady, isBackendReady, generateUncroppedPreview]);
 
   useEffect(() => {
     if (activeView === 'editor' && selectedImage?.isReady && displaySize.width > 0 && !isSliderDragging) {
@@ -436,32 +694,146 @@ export function useImageProcessing(
 
         applyAdjustments(renderAdjustments, false, targetRes);
 
-        if (previewOverride) return;
+        // A LUT being hovered is a preview of somebody else's look, not this
+        // photo's state, so it is not saved. It still has to be reasoned about
+        // below, because an adjustment changed during a hover is real.
+        const previewing = !!previewOverride;
 
-        debouncedSave(selectedImage.path, adjustments);
+        // ============ BLITZRAW: name the one thing the user just did ============
+        // The same name goes to the photo in the editor and to every photo the
+        // change is sent to, so all of them can later be found again as one
+        // action. Worked out here because this is the one place that sees both.
+        //
+        // Nothing is named on the first sight of a photo: with no earlier state
+        // of its own to compare against, every value would read as a change
+        // somebody had just made. See utils/actionId.ts.
+        const seenBefore =
+          lastSeenAdjustmentsRef.current?.path === selectedImage.path
+            ? lastSeenAdjustmentsRef.current.adjustments
+            : null;
+        lastSeenAdjustmentsRef.current = { path: selectedImage.path, adjustments };
+        const moved = seenBefore ? changedKeys(seenBefore, adjustments) : [];
+        // A write that moved nothing belongs to no action.
+        //
+        // This effect re-runs on a dozen things that are not edits: the scopes
+        // changing what they ask for, the view changing, a panel opening. Each
+        // of those saves the photo again. `actionForChange` answers with the
+        // action still open when nothing has moved, which is the right answer
+        // for the question it was asked and the wrong name to put on this write:
+        // the save would be filed under an action it was never part of.
+        //
+        // That is what blocked an undo. A photo opened after a nudge across a
+        // selection had its next idle save stamped with the nudge's own name, so
+        // the nudge appeared to have moved sixty adjustments on that one photo,
+        // and stepping it back refused because the photo no longer looked like
+        // what the nudge had left.
+        //
+        // And a state that arrived from an undo, a redo or a click in the
+        // history list is not an edit either. It is the editor being told where
+        // the photo already is, and the photo was written by whoever moved it.
+        // Recording it would put a step of its own into the list of what I did,
+        // and recording anything throws away everything waiting to be redone,
+        // which is why Ctrl+Y did nothing after an undo. The same phantom is
+        // why an undo sometimes needed pressing twice: the first press took
+        // back the phantom rather than the edit.
+        const cameFromHistory =
+          useEditorStore.getState().historyMoveAt !== lastHistoryMoveRef.current;
+        const actionId = moved.length > 0 && !cameFromHistory ? actionForChange(moved) : null;
+        // ========== BLITZRAW END: name the one thing the user just did ==========
 
-        const otherPaths = multiSelectedPaths.filter((p) => p !== selectedImage.path);
-        if (appSettings?.copyPasteSettings?.autoSync && otherPaths.length > 0) {
-          const prev = prevAdjustmentsRef.current;
-          if (prev && prev.path === selectedImage.path) {
-            const delta: Partial<Adjustments> = {};
-            const includedKeys = appSettings?.copyPasteSettings?.includedAdjustments || COPYABLE_ADJUSTMENT_KEYS;
-            for (const key of Object.keys(adjustments) as Array<keyof Adjustments>) {
-              if (includedKeys.includes(key as string)) {
-                if (JSON.stringify(adjustments[key]) !== JSON.stringify(prev.adjustments[key])) {
-                  (delta as any)[key] = adjustments[key];
-                }
-              }
+        if (!previewing) {
+          // BLITZRAW: the save reports which numbers it moved this photo
+          // between, and those two numbers are the whole of what the
+          // application's list holds. The fan-out below reports the same for
+          // the rest of the selection; one action name makes them one entry.
+          // See utils/appActions.ts.
+          const openPath = selectedImage.path;
+          const inEditor = activeView === 'editor';
+          const forSelection = multiSelectedPaths;
+          const named = nameForKeys(moved);
+          debouncedSave(openPath, adjustments, actionId, (photo) => {
+            // BLITZRAW: the number this write was given, so the History panel
+            // knows which step each of its rows really is.
+            useEditorStore.getState().numberCurrentStep(photo.path, photo.to);
+            if (cameFromHistory) {
+              return;
             }
-            if (Object.keys(delta).length > 0) {
-              otherPaths.forEach((p) => globalImageCache.delete(p));
-              invoke(Invokes.ApplyAdjustmentsToPaths, { paths: otherPaths, adjustments: delta }).catch((err) => {
-                console.error('Failed to apply adjustments to multi-selection:', err);
-              });
-            }
-          }
+            recordAppAction({
+              id: actionId,
+              kind: 'adjustments',
+              label: named,
+              photos: [photo],
+              selection: forSelection,
+              openPath,
+              inEditor,
+            });
+          });
         }
-        prevAdjustmentsRef.current = { path: selectedImage.path, adjustments };
+
+        // ============ BLITZRAW: one rule for the rest of the selection ============
+        // This used to be five guards on four branches, each added after
+        // something went out to photos it should not have. The whole rule is in
+        // `autoSyncPlan` now, and it answers one of four ways. See
+        // utils/autoSync.ts for what each means and why.
+        //
+        // The part that matters most: a decision NOT to send still moves the
+        // reference forward. A reference that only moved on the way out is what
+        // let a crop sit unrecorded and then ride along with a later, unrelated
+        // change to two hundred photos.
+        const resolvedTargets = selectionFor(EDIT_RULE, multiSelectedPaths);
+        // Worked out above, before anything was saved or recorded, and only
+        // spent here.
+        lastHistoryMoveRef.current = useEditorStore.getState().historyMoveAt;
+
+        const plan = autoSyncPlan({
+          autoSyncOn: !!appSettings?.copyPasteSettings?.autoSync,
+          inEditor: activeView === 'editor',
+          openPath: selectedImage.path,
+          resolvedTargets,
+          fromHistoryMove: cameFromHistory,
+          typing: isSliderTyping,
+          previewing,
+        });
+
+        if (plan.kind === 'none') {
+          return;
+        }
+        if (plan.kind === 'advance') {
+          prevAdjustmentsRef.current = {
+            path: selectedImage.path,
+            adjustments,
+            setBy: 'an edit that was not sent',
+            setAt: Date.now(),
+          };
+          return;
+        }
+
+        // A change belongs to the selection it was made for. If the selection
+        // has moved on since something was recorded, that something goes to the
+        // photos it was aimed at before anything is recorded against the new
+        // ones. It is never re-aimed.
+        const waiting = pendingSyncRef.current;
+        if (waiting && !sameTargets(waiting.paths, plan.paths)) {
+          flushAutoSync.flush();
+        }
+        pendingSyncRef.current = {
+          path: selectedImage.path,
+          paths: plan.paths,
+          adjustments,
+          actionId,
+        };
+
+        // `hold` records but does not send. A number typed into a field arrives
+        // one character at a time, so 4800 comes through as 4, then 48, then
+        // 480, and writing every other selected photo for each of those left a
+        // set of them sitting at 2000K. Recording it is what is new: the hold
+        // used to keep nothing at all, so when the field closed the value was
+        // aimed at whatever happened to be selected by then, and a field can
+        // stay open for minutes.
+        if (plan.kind === 'send') {
+          flushAutoSync();
+        }
+        // ========== BLITZRAW END: one rule for the rest of the selection ==========
       }, 50);
     }
 
@@ -476,11 +848,20 @@ export function useImageProcessing(
     selectedImage?.path,
     selectedImage?.isReady,
     isSliderDragging,
+    isSliderTyping,
     multiSelectedPaths,
     appSettings?.enableLivePreviews,
     appSettings?.copyPasteSettings?.includedAdjustments,
     appSettings?.copyPasteSettings?.autoSync,
     isWaveformVisible,
+    // What the scopes are asking for, not just whether any are showing.
+    //
+    // The request is read from a ref at the moment a render is asked for, so a
+    // change to it with nothing else changing was never sent: adding a scope or
+    // turning the vectorscope gain up altered the string and then waited for a
+    // slider to be touched. The gain button appeared to do nothing at all.
+    activeWaveformChannel,
+    flushAutoSync,
   ]);
 
   useEffect(() => {

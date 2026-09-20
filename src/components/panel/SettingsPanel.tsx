@@ -41,14 +41,19 @@ import {
   KEYBIND_SECTIONS,
   normalizeCombo,
 } from '../../utils/keyboardUtils';
+import { quickKeybindDefinitions } from '../../utils/quickAdjustments';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useOsPlatform } from '../../hooks/useOsPlatform';
 import { open } from '@tauri-apps/plugin-shell';
+import { useWorkspace } from '../../hooks/useWorkspace';
+import { toast } from 'react-toastify';
 
 interface ConfirmModalState {
   confirmText: string;
   confirmVariant: string;
+  /** BLITZRAW: set for the actions that cannot be undone. See ConfirmModal. */
+  confirmPhrase?: string;
   isOpen: boolean;
   message: string;
   onConfirm(): void;
@@ -498,6 +503,22 @@ export default function SettingsPanel({
 }: SettingsPanelProps) {
   const { user: _user } = useUser();
   const { t } = useTranslation();
+  const { profiles, saveProfile, loadProfile, deleteProfile, resetWorkspace, currentProfileName } =
+    useWorkspace();
+  const [layoutName, setLayoutName] = useState('');
+  // Recomputed every render rather than remembered, so it stops being true the
+  // moment a panel is dragged. See sameWorkspace.
+  const activeProfileName = currentProfileName();
+  // BLITZRAW: asynchronous now, because a profile records where the windows
+  // are and only the backend can say. See useWorkspace.
+  const handleSaveLayout = async () => {
+    const name = layoutName.trim();
+    if (!name) return;
+    if (await saveProfile(name)) {
+      toast.success(t('settings.general.workspaceSaved', { name }));
+      setLayoutName('');
+    }
+  };
   const [isClearing, setIsClearing] = useState(false);
   const [clearMessage, setClearMessage] = useState('');
   const [isClearingCache, setIsClearingCache] = useState(false);
@@ -541,6 +562,7 @@ export default function SettingsPanel({
       appSettings?.useWgpuRenderer ?? (osPlatform === 'linux' || osPlatform === 'android' ? false : true),
     thumbnailWorkerThreads: appSettings?.thumbnailWorkerThreads ?? 4,
     imageCacheSize: appSettings?.imageCacheSize ?? 5,
+    historyStepLimit: appSettings?.historyStepLimit ?? 100,
     rawPreprocessingColorNr: appSettings?.rawPreprocessingColorNr ?? 0.5,
     rawPreprocessingSharpening: appSettings?.rawPreprocessingSharpening ?? 0.35,
     applyPreprocessingToNonRaws: appSettings?.applyPreprocessingToNonRaws ?? false,
@@ -648,6 +670,7 @@ export default function SettingsPanel({
       useWgpuRenderer: appSettings?.useWgpuRenderer ?? true,
       thumbnailWorkerThreads: appSettings?.thumbnailWorkerThreads ?? 4,
       imageCacheSize: appSettings?.imageCacheSize ?? 5,
+    historyStepLimit: appSettings?.historyStepLimit ?? 100,
       rawPreprocessingColorNr: appSettings?.rawPreprocessingColorNr ?? 0.5,
       rawPreprocessingSharpening: appSettings?.rawPreprocessingSharpening ?? 0.35,
       applyPreprocessingToNonRaws: appSettings?.applyPreprocessingToNonRaws ?? false,
@@ -784,6 +807,9 @@ export default function SettingsPanel({
     setConfirmModalState({
       confirmText: t('settings.data.modals.confirmDeleteAllEdits'),
       confirmVariant: 'destructive',
+      // BLITZRAW: this one takes every edit on every photo under every root
+      // folder. A button that far-reaching should not be one stray click away.
+      confirmPhrase: t('settings.data.modals.sidecarPhrase'),
       isOpen: true,
       message: t('settings.data.modals.sidecarMessage'),
       onConfirm: executeClearSidecars,
@@ -1062,6 +1088,107 @@ export default function SettingsPanel({
                           value={appSettings?.theme || DEFAULT_THEME_ID}
                           triggerClassName="bg-bg-primary"
                         />
+                      </SettingItem>
+
+                      {/* The layout autosaves, which is right for not losing a
+                          nudge and wrong for anything deliberate. Reset is the
+                          one that matters: an arrangement can hide the control
+                          that would undo it, and the only way back was editing
+                          settings.json by hand. */}
+                      <SettingItem
+                        label={t('settings.general.workspace')}
+                        description={t('settings.general.workspaceDesc')}
+                      >
+                        <div className="flex flex-col gap-2 w-full max-w-md">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={layoutName}
+                              onChange={(e: any) => setLayoutName(e.target.value)}
+                              onKeyDown={(e: any) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleSaveLayout();
+                                }
+                              }}
+                              placeholder={t('settings.general.workspaceNamePlaceholder')}
+                              className="flex-1 min-w-0 px-3 py-1.5 rounded-md bg-bg-primary text-text-primary placeholder:text-text-secondary outline-none focus:ring-1 focus:ring-accent"
+                            />
+                            <button
+                              className="px-3 py-1.5 rounded-md bg-bg-primary text-text-primary hover:bg-card-active disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+                              disabled={!layoutName.trim()}
+                              onClick={handleSaveLayout}
+                            >
+                              {t('settings.general.workspaceSave')}
+                            </button>
+                          </div>
+
+                          {profiles.length > 0 && (
+                            <div className="rounded-md bg-bg-primary divide-y divide-surface">
+                              {profiles.map((profile: any) => {
+                                const isCurrent = profile.name === activeProfileName;
+                                return (
+                                  <div key={profile.name} className="flex items-center gap-2 px-3 py-1.5">
+                                    <span
+                                      className={clsx(
+                                        'flex-1 min-w-0 truncate',
+                                        isCurrent ? 'text-accent font-semibold' : 'text-text-primary',
+                                      )}
+                                    >
+                                      {profile.name}
+                                    </span>
+                                    {isCurrent && (
+                                      <span className="shrink-0 text-xs uppercase text-accent opacity-80">
+                                        {t('settings.general.workspaceCurrent')}
+                                      </span>
+                                    )}
+                                    <button
+                                      className="shrink-0 px-2 py-1 rounded text-text-secondary hover:bg-surface hover:text-text-primary transition-colors"
+                                      onClick={async () => {
+                                        if (await loadProfile(profile.name)) {
+                                          toast.success(t('settings.general.workspaceLoaded', { name: profile.name }));
+                                        }
+                                      }}
+                                    >
+                                      {t('settings.general.workspaceLoad')}
+                                    </button>
+                                    <button
+                                      className="shrink-0 px-2 py-1 rounded text-text-secondary hover:bg-surface hover:text-text-primary transition-colors"
+                                      onClick={async () => {
+                                        if (await saveProfile(profile.name)) {
+                                          toast.success(
+                                            t('settings.general.workspaceOverwritten', { name: profile.name }),
+                                          );
+                                        }
+                                      }}
+                                    >
+                                      {t('settings.general.workspaceOverwrite')}
+                                    </button>
+                                    <button
+                                      className="shrink-0 px-2 py-1 rounded text-text-secondary hover:bg-surface hover:text-red-400 transition-colors"
+                                      onClick={() => {
+                                        deleteProfile(profile.name);
+                                        toast.success(t('settings.general.workspaceDeleted', { name: profile.name }));
+                                      }}
+                                    >
+                                      {t('settings.general.workspaceDelete')}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          <button
+                            className="self-start px-3 py-1.5 rounded-md bg-bg-primary text-text-secondary hover:bg-card-active hover:text-text-primary transition-colors"
+                            onClick={() => {
+                              resetWorkspace();
+                              toast.success(t('settings.general.workspaceReset'));
+                            }}
+                          >
+                            {t('settings.general.workspaceResetAction')}
+                          </button>
+                        </div>
                       </SettingItem>
 
                       <SettingItem label={t('settings.language')} description={t('settings.languageDesc')}>
@@ -1566,6 +1693,17 @@ export default function SettingsPanel({
                     <Text as="ul" className="space-y-3 list-disc ml-5 pl-1">
                       <li>
                         <a
+                          href="https://github.com/CyberTimon/RapidRAW"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold text-accent hover:underline"
+                        >
+                          RapidRAW
+                        </a>
+                        : {t('settings.thanks.list.rapidraw')}
+                      </li>
+                      <li>
+                        <a
                           href="https://github.com/dnglab/dnglab/tree/main/rawler"
                           target="_blank"
                           rel="noopener noreferrer"
@@ -1889,6 +2027,24 @@ export default function SettingsPanel({
                           defaultValue={5}
                           onChange={(e: any) =>
                             handleProcessingSettingChange('imageCacheSize', parseInt(e.target.value))
+                          }
+                          fillOrigin="min"
+                        />
+                      </SettingItem>
+
+                      <SettingItem
+                        label={t('settings.processing.historySteps')}
+                        description={t('settings.processing.historyStepsDesc')}
+                      >
+                        <Slider
+                          label={t('settings.processing.steps')}
+                          min={20}
+                          max={1000}
+                          step={10}
+                          value={processingSettings.historyStepLimit}
+                          defaultValue={100}
+                          onChange={(e: any) =>
+                            handleProcessingSettingChange('historyStepLimit', parseInt(e.target.value))
                           }
                           fillOrigin="min"
                         />
@@ -2405,7 +2561,13 @@ export default function SettingsPanel({
                     <div className="space-y-8">
                       {' '}
                       {KEYBIND_SECTIONS.map((section) => {
-                        const sectionDefs = KEYBIND_DEFINITIONS.filter((d) => d.section === section.id);
+                        // Quick Adjustments is built from a list that grows,
+                        // so its rows come from the same helper the dispatcher
+                        // uses rather than from the static definitions.
+                        const sectionDefs =
+                          section.id === 'quick'
+                            ? quickKeybindDefinitions(appSettings?.quickAdjustments)
+                            : KEYBIND_DEFINITIONS.filter((d) => d.section === section.id);
                         const userKb = appSettings?.keybinds || {};
                         return (
                           <div key={section.id}>

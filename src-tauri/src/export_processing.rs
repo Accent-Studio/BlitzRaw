@@ -441,6 +441,12 @@ fn process_image_for_export_pipeline(
 
     let tm_override = resolve_tonemapper_override_from_handle(app_handle, is_raw);
     let mut all_adjustments = get_all_adjustments_from_json(js_adjustments, is_raw, tm_override);
+    // BLITZRAW: white balance from the camera's own calibration.
+    crate::image_processing::apply_camera_profile_to_adjustments(
+        &mut all_adjustments,
+        path,
+        js_adjustments,
+    );
     all_adjustments.global.show_clipping = 0;
 
     let lut_path = js_adjustments["lutPath"].as_str();
@@ -704,7 +710,14 @@ fn export_masks_for_image(
 
     if !mask_bitmaps.is_empty() {
         let tm_override = resolve_tonemapper_override_from_handle(app_handle, is_raw);
-        let all_adjustments = get_all_adjustments_from_json(js_adjustments, is_raw, tm_override);
+        let mut all_adjustments =
+            get_all_adjustments_from_json(js_adjustments, is_raw, tm_override);
+        // BLITZRAW: white balance from the camera's own calibration.
+        crate::image_processing::apply_camera_profile_to_adjustments(
+            &mut all_adjustments,
+            source_path_str,
+            js_adjustments,
+        );
         let lut_path = js_adjustments["lutPath"].as_str();
         let lut = lut_path.and_then(|p| get_or_load_lut(state, p).ok());
         let unique_hash = calculate_full_job_hash(source_path_str, js_adjustments);
@@ -1501,6 +1514,12 @@ pub async fn estimate_export_sizes(
         let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
         let mut all_adjustments =
             get_all_adjustments_from_json(&adjustments_clone, is_raw, tm_override);
+        // BLITZRAW: white balance from the camera's own calibration.
+        crate::image_processing::apply_camera_profile_to_adjustments(
+            &mut all_adjustments,
+            &source_path_str,
+            &adjustments_clone,
+        );
         all_adjustments.global.show_clipping = 0;
 
         let lut = adjustments_clone["lutPath"]
@@ -1639,6 +1658,12 @@ pub async fn estimate_export_sizes(
         let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
         let mut all_adjustments =
             get_all_adjustments_from_json(&js_adjustments, is_raw, tm_override);
+        // BLITZRAW: white balance from the camera's own calibration.
+        crate::image_processing::apply_camera_profile_to_adjustments(
+            &mut all_adjustments,
+            &source_path_str,
+            &js_adjustments,
+        );
         all_adjustments.global.show_clipping = 0;
 
         let lut = js_adjustments["lutPath"]

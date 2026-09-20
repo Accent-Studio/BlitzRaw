@@ -61,6 +61,8 @@
       "tint": "Tonung",
       "toggleSliders": "Regler umschalten",
       "vibrance": "Dynamik",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "Weißabgleich-Pipette",
       "wbPickerWgpuDisabled": "WA-Pipette: WGPU in den Einstellungen deaktivieren.",
       "whiteBalance": "Weißabgleich"

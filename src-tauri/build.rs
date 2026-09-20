@@ -68,11 +68,99 @@ fn download_and_verify(
     }
 }
 
+// ============ BLITZRAW: the DirectML build of ONNX Runtime ============
+// The runtime upstream downloads has no GPU support at all, so every AI model
+// in the app runs on the processor. That is a graphics card sitting idle while
+// the CPU takes minutes over a denoise.
+//
+// DirectML rather than CUDA. DirectML needs two DLLs and any DirectX 12 card;
+// CUDA would be faster on an NVIDIA card but wants about 2.6 GB of NVIDIA
+// libraries shipped alongside, which is not a trade worth making here.
+//
+// Both files come from Microsoft's own NuGet feed. The two versions belong
+// together and must not be bumped separately: 1.22.0 is the runtime that
+// `ort 2.0.0-rc.10` expects, and that package's own manifest names 1.15.4 as
+// the DirectML it was built against.
+//
+// The DirectML build also contains the processor path, so this is a superset
+// of what it replaces. A machine with no suitable card still works; the
+// registration in `ai_processing.rs` falls back and says so in the log.
+#[cfg(windows)]
+const DIRECTML_PARTS: [(&str, &str, &str, &str); 2] = [
+    (
+        "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.22.0/microsoft.ml.onnxruntime.directml.1.22.0.nupkg",
+        "runtimes/win-x64/native/onnxruntime.dll",
+        "onnxruntime.dll",
+        "95366724919f4e95ecc60010912ed538ad9804b6683fbd0aad389749102834b9",
+    ),
+    (
+        "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+        "bin/x64-win/DirectML.dll",
+        "DirectML.dll",
+        "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1",
+    ),
+];
+
+#[cfg(windows)]
+fn ensure_directml(dest_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Cursor;
+
+    for (url, entry_name, out_name, expected_hash) in DIRECTML_PARTS {
+        let dest_path = dest_dir.join(out_name);
+        if dest_path.exists() && verify_sha256(&dest_path, expected_hash).unwrap_or(false) {
+            println!("cargo:warning={out_name} is already the DirectML build. Skipping.");
+            continue;
+        }
+
+        println!("cargo:warning=Downloading {out_name} from Microsoft's NuGet feed...");
+        let response = reqwest::blocking::get(url)?;
+        if !response.status().is_success() {
+            return Err(format!("{url} returned {}", response.status()).into());
+        }
+        let package = response.bytes()?;
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(package))?;
+        let mut entry = archive.by_name(entry_name)?;
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        std::io::copy(&mut entry, &mut bytes)?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let got = hex::encode(hasher.finalize());
+        if got != expected_hash {
+            return Err(format!("{out_name} hashed {got}, expected {expected_hash}").into());
+        }
+
+        // Written beside and renamed, so a build stopped part way through never
+        // leaves a half-written DLL that the next one would trust.
+        let temp = dest_path.with_extension("dll.part");
+        fs::write(&temp, &bytes)?;
+        fs::rename(&temp, &dest_path)?;
+        println!("cargo:warning=Wrote {}", dest_path.display());
+    }
+
+    Ok(())
+}
+// ========== BLITZRAW END: the DirectML build of ONNX Runtime ==========
+
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+
+    // BLITZRAW: on Windows the DirectML pair replaces the processor-only
+    // runtime that the download below would fetch, so that path is skipped.
+    #[cfg(windows)]
+    if target_os == "windows" && target_arch == "x86_64" {
+        let dest_dir = manifest_dir.join("resources");
+        fs::create_dir_all(&dest_dir).unwrap();
+        if let Err(e) = ensure_directml(&dest_dir) {
+            panic!("Failed to fetch the DirectML runtime: {e}");
+        }
+        println!("cargo:rerun-if-changed=build.rs");
+        return tauri_build::build();
+    }
 
     let (download_filename, lib_name, expected_hash) =
         match (target_os.as_str(), target_arch.as_str()) {

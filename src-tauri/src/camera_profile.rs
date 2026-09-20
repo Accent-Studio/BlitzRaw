@@ -39,7 +39,7 @@ pub const D50_XY: (f32, f32) = (0.3457, 0.3585);
 /// The pipeline downstream of us works in linear sRGB primaries, so this is
 /// where the profile connection space is handed over to it.
 pub const XYZ_D50_TO_LINEAR_SRGB: Matrix3 = [
-    [3.1338561, -1.6168667, -0.4906146],
+    [3.133_856, -1.6168667, -0.4906146],
     [-0.9787684, 1.9161415, 0.0334540],
     [0.0719453, -0.2289914, 1.4052427],
 ];
@@ -593,7 +593,10 @@ impl CameraProfile {
         match self.forward_matrix_for(weight) {
             Some(fm) => {
                 let reference_neutral = mat_apply(&ab_cc_inv, camera_neutral);
-                if reference_neutral.iter().any(|c| !c.is_finite() || *c < 1e-9) {
+                if reference_neutral
+                    .iter()
+                    .any(|c| !c.is_finite() || *c < 1e-9)
+                {
                     return None;
                 }
                 let d = mat_diag([
@@ -879,8 +882,9 @@ pub fn remember(path: &str, profile: Option<CameraProfile>) {
 /// on whether a merge was made in this session or found on disk in the next.
 pub fn remember_decoded(path: &str, profile: Option<CameraProfile>) {
     let source = profile_key(path);
-    let recorded = crate::exif_processing::read_camera_profile_sidecar(std::path::Path::new(source))
-        .and_then(|stored| stored.to_profile());
+    let recorded =
+        crate::exif_processing::read_camera_profile_sidecar(std::path::Path::new(source))
+            .and_then(|stored| stored.to_profile());
     remember(source, recorded.or(profile));
 }
 
@@ -995,7 +999,9 @@ pub fn white_balance_from_json(
         kelvin: read("kelvin")
             .unwrap_or(as_shot_kelvin)
             .clamp(MIN_KELVIN, MAX_KELVIN),
-        tint: read("tint").unwrap_or(as_shot_tint).clamp(MIN_TINT, MAX_TINT),
+        tint: read("tint")
+            .unwrap_or(as_shot_tint)
+            .clamp(MIN_TINT, MAX_TINT),
     }
 }
 
@@ -1123,7 +1129,10 @@ mod tests {
     /// different colour from its original.
     #[test]
     fn a_virtual_copy_shares_its_original_profile() {
-        assert_eq!(profile_key("D:/photo/_DSC1.dng?vc=abc123"), "D:/photo/_DSC1.dng");
+        assert_eq!(
+            profile_key("D:/photo/_DSC1.dng?vc=abc123"),
+            "D:/photo/_DSC1.dng"
+        );
         assert_eq!(profile_key("D:/photo/_DSC1.dng"), "D:/photo/_DSC1.dng");
         // A file whose own name contains the marker still resolves to itself
         // when there is no suffix after it.
@@ -1165,8 +1174,11 @@ mod tests {
         // What inherit_profile records: the camera's own, off-neutral white.
         let mut recorded = srgb_like_profile();
         recorded.as_shot_neutral = [0.45, 1.0, 0.72];
-        crate::exif_processing::write_camera_profile_sidecar(&merge, &StoredProfile::from(&recorded))
-            .expect("record the inherited profile");
+        crate::exif_processing::write_camera_profile_sidecar(
+            &merge,
+            &StoredProfile::from(&recorded),
+        )
+        .expect("record the inherited profile");
 
         // What decoding the merge reports: the neutral description hdr_dng
         // wrote so the file would describe its own pixels.
@@ -1211,7 +1223,11 @@ mod tests {
 
         assert_eq!(restored.calibrations.len(), original.calibrations.len());
         assert_eq!(restored.as_shot_neutral, original.as_shot_neutral);
-        for (a, b) in restored.calibrations.iter().zip(original.calibrations.iter()) {
+        for (a, b) in restored
+            .calibrations
+            .iter()
+            .zip(original.calibrations.iter())
+        {
             assert_eq!(a.illuminant, b.illuminant, "illuminant code survives");
             assert_eq!(a.color_matrix, b.color_matrix);
             assert_eq!(a.forward_matrix, b.forward_matrix);
@@ -1294,7 +1310,10 @@ mod tests {
     fn d65_reads_as_roughly_6500k() {
         let (temp, tint) = xy_to_temp_tint(0.31271, 0.32902);
         assert_close(temp, 6500.0, 100.0, "D65 temperature");
-        assert!(tint.abs() < 10.0, "D65 tint should be near zero, got {tint}");
+        assert!(
+            tint.abs() < 10.0,
+            "D65 tint should be near zero, got {tint}"
+        );
     }
 
     /// Temperature and tint describe the *illuminant*, not the correction, and
@@ -1559,11 +1578,9 @@ mod tests {
         let (w, h) = (16u32, 16u32);
         let colour = [0.0671f32, 0.0673, 0.0697];
 
-        let rgba = DynamicImage::ImageRgba32F(
-            Rgba32FImage::from_fn(w, h, |_, _| {
-                image::Rgba([colour[0], colour[1], colour[2], 1.0])
-            }),
-        );
+        let rgba = DynamicImage::ImageRgba32F(Rgba32FImage::from_fn(w, h, |_, _| {
+            image::Rgba([colour[0], colour[1], colour[2], 1.0])
+        }));
         let rgb = DynamicImage::ImageRgb32F(Rgb32FImage::from_fn(w, h, |_, _| {
             image::Rgb([colour[0], colour[1], colour[2]])
         }));

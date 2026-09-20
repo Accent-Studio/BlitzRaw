@@ -4,10 +4,24 @@ import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextVariants } from '../../types/typography';
 
+/** An optional toggle shown above the buttons, for a choice that belongs to the
+ *  action being confirmed rather than to a settings panel. */
+export interface ConfirmModalCheckbox {
+  label: string;
+  checked: boolean;
+  onChange(checked: boolean): void;
+}
+
 interface ConfirmModalProps {
   cancelText?: string;
+  checkbox?: ConfirmModalCheckbox;
   confirmText?: string;
   confirmVariant?: string;
+  /** BLITZRAW: a word that has to be typed before Confirm will do anything.
+   *  For the few actions that take away more than one thing and cannot be put
+   *  back by pressing Ctrl+Z. A click lands where the mouse already was; typing
+   *  a word does not happen by accident. */
+  confirmPhrase?: string;
   isOpen: boolean;
   message?: string;
   onClose(): void;
@@ -17,8 +31,10 @@ interface ConfirmModalProps {
 
 export default function ConfirmModal({
   cancelText,
+  checkbox,
   confirmText,
   confirmVariant = 'primary',
+  confirmPhrase,
   isOpen,
   message,
   onClose,
@@ -28,12 +44,17 @@ export default function ConfirmModal({
   const { t } = useTranslation();
   const [isMounted, setIsMounted] = useState(false);
   const [show, setShow] = useState(false);
+  const [typed, setTyped] = useState('');
+  const isUnlocked = !confirmPhrase || typed.trim().toLowerCase() === confirmPhrase.toLowerCase();
 
   const resolvedCancelText = cancelText || t('modals.confirm.cancel');
   const resolvedConfirmText = confirmText || t('modals.confirm.confirm');
 
   useEffect(() => {
     if (isOpen) {
+      // BLITZRAW: cleared on every open, so the word typed last time cannot
+      // still be sitting there waiting for a stray Enter.
+      setTyped('');
       setIsMounted(true);
       const timer = setTimeout(() => {
         setShow(true);
@@ -49,11 +70,16 @@ export default function ConfirmModal({
   }, [isOpen]);
 
   const handleConfirm = useCallback(() => {
+    // BLITZRAW: Enter goes through here too, so the gate belongs here rather
+    // than only on the button.
+    if (!isUnlocked) {
+      return;
+    }
     if (onConfirm) {
       onConfirm();
     }
     onClose();
-  }, [onConfirm, onClose]);
+  }, [isUnlocked, onConfirm, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -102,6 +128,34 @@ export default function ConfirmModal({
           {title}
         </Text>
         <Text className="mb-6 whitespace-pre-wrap">{message}</Text>
+        {checkbox && (
+          <label className="flex items-center gap-2 cursor-pointer select-none text-text-secondary hover:text-text-primary transition-colors">
+            <input
+              type="checkbox"
+              className="accent-accent w-4 h-4 cursor-pointer"
+              checked={checkbox.checked}
+              onChange={(e: any) => checkbox.onChange(e.target.checked)}
+            />
+            <Text variant={TextVariants.small}>{checkbox.label}</Text>
+          </label>
+        )}
+        {confirmPhrase && (
+          <div className="mt-4">
+            <Text variant={TextVariants.small} className="mb-2">
+              {t('modals.confirm.typeToConfirm', { phrase: confirmPhrase })}
+            </Text>
+            <input
+              type="text"
+              autoFocus={true}
+              spellCheck={false}
+              autoComplete="off"
+              value={typed}
+              onChange={(e: any) => setTyped(e.target.value)}
+              className="w-full bg-bg-primary text-text-primary rounded-md px-3 py-2 font-mono
+                         outline-hidden focus:ring-2 focus:ring-accent"
+            />
+          </div>
+        )}
         <div className="flex justify-end gap-3 mt-5">
           <Button
             className="bg-bg-primary shadow-transparent hover:bg-bg-primary text-white shadow-none focus:outline-hidden focus:ring-0"
@@ -114,8 +168,13 @@ export default function ConfirmModal({
           <Button
             onClick={handleConfirm}
             variant={confirmVariant}
-            autoFocus={true}
-            className="focus:outline-hidden focus:ring-0 focus:ring-offset-0"
+            disabled={!isUnlocked}
+            // BLITZRAW: the typing box takes the focus when there is one, so
+            // Enter cannot fire a destructive button nobody looked at.
+            autoFocus={!confirmPhrase}
+            className={`focus:outline-hidden focus:ring-0 focus:ring-offset-0 ${
+              isUnlocked ? '' : 'opacity-40 cursor-not-allowed'
+            }`}
           >
             {resolvedConfirmText}
           </Button>

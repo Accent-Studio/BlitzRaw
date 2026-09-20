@@ -1,3 +1,31 @@
+// Clippy lints this crate does not take, and the reason for each. CI runs
+// clippy with `-D warnings`, so a lint that is not wanted has to be named here
+// rather than left as noise that hides the next real one.
+//
+// `needless_range_loop`: the colour and merge maths index several arrays from
+//   one counter. Written as iterators they become zips and enumerates that no
+//   longer read like the formula they implement, in code whose output has been
+//   measured against real files. Clarity here is worth more than the lint.
+//
+// `neg_cmp_op_on_partial_ord`: `!(x >= 0.0)` is not `x < 0.0`. The first is
+//   true for NaN and the second is false for it, and these comparisons are
+//   guards that must reject NaN. Taking this lint would quietly let NaN
+//   through, which is the bug the guard exists to stop.
+//
+// `too_many_arguments` and `type_complexity`: the decode and merge paths really
+//   do take that many settings. Bundling them into a struct to satisfy a
+//   counter only hides which caller passes what.
+//
+// `field_reassign_with_default`: building a default and then setting fields
+//   reads in the order the work happens, which is how these were written.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::field_reassign_with_default
+)]
+
 #[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 use mimalloc::MiMalloc;
 
@@ -12,32 +40,57 @@ mod ai_processing;
 mod android_integration;
 mod app_settings;
 mod app_state;
+mod auto_stack;
+mod bulk_hdr;
 mod cache_utils;
+mod camera_profile;
 mod culling;
+mod data_dir;
 mod denoising;
+mod dng_convert;
+// BLITZRAW: a photo's edit history, kept in its sidecar.
+mod edit_history;
+mod embedded_xmp;
 mod exif_processing;
 mod export_processing;
 mod file_management;
 mod formats;
 mod gpu_processing;
 mod hdr_deghosting;
+mod hdr_dng;
+mod hdr_merge;
 mod image_loader;
 mod image_processing;
 mod inpainting;
 mod launch_request;
+mod legacy_names;
 mod lens_blur;
 mod lens_correction;
+mod library_ignore;
+mod log_sink;
 mod lut_processing;
 mod mask_generation;
 mod multi_exposure;
+mod nef_compression;
 mod negative_conversion;
+mod panel_window;
 mod panorama_stitching;
 mod panorama_utils;
+// BLITZRAW: the vector pen mask, drawn as a path rather than painted.
+mod pen_mask;
 mod preset_converter;
+mod preview_cache;
+// BLITZRAW: the picture moves before the raw has finished decoding.
+mod proxy_preview;
 mod raw_processing;
+mod resilient_emit;
+// BLITZRAW: the one door through which a photo's sidecar is written.
+mod sidecar;
+mod stacks;
 mod tagging;
 mod tagging_utils;
 mod window_customizer;
+mod window_places;
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fs;
@@ -56,8 +109,6 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Luma, RgbImage, Rgba};
-use image_hdr::hdr_merge_images;
-use image_hdr::input::HDRInput;
 use imageproc::drawing::draw_line_segment_mut;
 use imageproc::edges::canny;
 use imageproc::hough::{LineDetectionOptions, detect_lines};
@@ -319,6 +370,25 @@ async fn update_wgpu_transform(
 }
 
 #[allow(clippy::too_many_arguments)]
+// ============ BLITZRAW: waiting for a decode is not a fault ============
+/// What a render says when there is no photo in hand to render.
+///
+/// `load_image` clears the held image before it starts decoding, and a Z9 frame
+/// takes about a second and a half, so anything asking for a render in that gap
+/// finds nothing. That is the ordinary way opening a photo goes: the metadata
+/// arrives first, the editor sets the adjustments it just read, and that asks
+/// for a render before the pixels exist.
+///
+/// Nothing is lost by it. When the decode lands, `load_image` returns and the
+/// editor sets the size it learned, which asks for the render again.
+///
+/// It was logged as an error, nineteen times in one session. This project reads
+/// its log to work out what went wrong, so a line saying ERROR about the normal
+/// way a photo opens costs more than it sounds: it is what you find when you go
+/// looking for the cause of something else.
+pub const NOTHING_LOADED_YET: &str = "No original image loaded";
+// ========== BLITZRAW END: waiting for a decode is not a fault ==========
+
 fn process_preview_job(
     app_handle: &tauri::AppHandle,
     state: tauri::State<AppState>,
@@ -337,7 +407,7 @@ fn process_preview_job(
     let loaded_image_guard = state.original_image.lock().unwrap();
     let loaded_image = loaded_image_guard
         .as_ref()
-        .ok_or("No original image loaded")?
+        .ok_or(NOTHING_LOADED_YET)?
         .clone();
     drop(loaded_image_guard);
 
@@ -475,16 +545,32 @@ fn process_preview_job(
 
     let is_raw = loaded_image.is_raw;
     let tm_override = resolve_tonemapper_override_from_handle(app_handle, is_raw);
-    let final_adjustments = get_all_adjustments_from_json(&adjustments_clone, is_raw, tm_override);
+    let mut final_adjustments =
+        get_all_adjustments_from_json(&adjustments_clone, is_raw, tm_override);
+    // BLITZRAW: white balance from the camera's own calibration.
+    crate::image_processing::apply_camera_profile_to_adjustments(
+        &mut final_adjustments,
+        &loaded_image.path,
+        &adjustments_clone,
+    );
     let lut_path = adjustments_clone["lutPath"].as_str();
     let lut = lut_path.and_then(|p| lut_processing::get_or_load_lut(&state, p).ok());
 
     let wants_analytics = !(is_interactive && pixel_roi.is_some());
-    let channel_filter = if is_interactive {
-        active_waveform_channel.map(|s| s.to_string())
-    } else {
-        None
-    };
+    // ============ BLITZRAW: ask for the scopes that are being looked at ============
+    // This used to pass the requested list only while a slider was moving, and
+    // None otherwise. None means "all of them" to
+    // `calculate_waveform_from_image`, so every ordinary render computed five
+    // scopes to show one or two, and the vectorscope's gain, which travels
+    // inside the request as `vectorscope:3`, was thrown away with the rest of
+    // it. The scope magnified while a slider moved and snapped back the instant
+    // it was released, which is exactly the shape of a value that only survives
+    // the interactive path.
+    //
+    // The front end sends what is on screen either way, so there is nothing to
+    // choose between: passing it always is both correct and less work.
+    let channel_filter = active_waveform_channel.map(|s| s.to_string());
+    // ========== BLITZRAW END: ask for the scopes that are being looked at ==========
 
     let analytics_config = if wants_analytics {
         state
@@ -629,7 +715,11 @@ fn start_analytics_worker(app_handle: tauri::AppHandle) {
             };
 
             if histogram_data.is_some() || waveform_data.is_some() {
-                let _ = app_handle.emit(
+                // Per window rather than broadcast: a broadcast gives up at the
+                // first window that will not take it, and the order is a hash
+                // map's. See resilient_emit.
+                crate::resilient_emit::emit_to_every_window(
+                    &app_handle,
                     "analytics-update",
                     serde_json::json!({
                         "path": job.path,
@@ -668,6 +758,12 @@ fn start_preview_worker(app_handle: tauri::AppHandle) {
             ) {
                 Ok(bytes) => {
                     let _ = responder.send(bytes);
+                }
+                // BLITZRAW: still decoding is not an error. See
+                // NOTHING_LOADED_YET. Kept visible, since a missing log line is
+                // its own kind of confusion, but named for what it is.
+                Err(e) if e == NOTHING_LOADED_YET => {
+                    log::info!("Preview skipped: the photo is still being decoded");
                 }
                 Err(e) => {
                     log::error!("Preview worker error: {}", e);
@@ -808,8 +904,14 @@ fn generate_uncropped_preview(
             .collect();
 
         let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
-        let uncropped_adjustments =
+        let mut uncropped_adjustments =
             get_all_adjustments_from_json(&adjustments_clone, is_raw, tm_override);
+        // BLITZRAW: white balance from the camera's own calibration.
+        crate::image_processing::apply_camera_profile_to_adjustments(
+            &mut uncropped_adjustments,
+            &path,
+            &adjustments_clone,
+        );
         let lut_path = adjustments_clone["lutPath"].as_str();
         let lut = lut_path.and_then(|p| lut_processing::get_or_load_lut(&state, p).ok());
 
@@ -981,8 +1083,14 @@ async fn preview_geometry_transform(
             }
 
             let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
-            let all_adjustments =
+            let mut all_adjustments =
                 get_all_adjustments_from_json(&temp_adjustments, is_raw, tm_override);
+            // BLITZRAW: white balance from the camera's own calibration.
+            crate::image_processing::apply_camera_profile_to_adjustments(
+                &mut all_adjustments,
+                &loaded_image_path,
+                &temp_adjustments,
+            );
             let lut_path = temp_adjustments["lutPath"].as_str();
             let lut = lut_path.and_then(|p| lut_processing::get_or_load_lut(&state, p).ok());
             let mask_bitmaps = Vec::new();
@@ -1165,7 +1273,13 @@ fn generate_preset_preview(
         .collect();
 
     let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
-    let all_adjustments = get_all_adjustments_from_json(&js_adjustments, is_raw, tm_override);
+    let mut all_adjustments = get_all_adjustments_from_json(&js_adjustments, is_raw, tm_override);
+    // BLITZRAW: white balance from the camera's own calibration.
+    crate::image_processing::apply_camera_profile_to_adjustments(
+        &mut all_adjustments,
+        &loaded_image.path,
+        &js_adjustments,
+    );
     let lut_path = js_adjustments["lutPath"].as_str();
     let lut = lut_path.and_then(|p| lut_processing::get_or_load_lut(&state, p).ok());
 
@@ -1403,6 +1517,9 @@ async fn save_temp_file(bytes: Vec<u8>) -> Result<String, String> {
 #[tauri::command]
 async fn merge_hdr(
     paths: Vec<String>,
+    // BLITZRAW: absent means yes, so a single merge from the modal is
+    // unchanged and only the bulk queue has to say anything.
+    with_preview: Option<bool>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -1413,37 +1530,98 @@ async fn merge_hdr(
     let hdr_result_handle = state.hdr_result.clone();
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
 
+    // ============== BLITZRAW: what each stage of a merge costs ==============
+    // A bulk run is minutes per dozen brackets and the log said only that a
+    // merge had started and finished, so which stage owned the time had to be
+    // worked out from file modification times afterwards. Twice.
+    let began = std::time::Instant::now();
+    let stage = std::time::Instant::now();
     let mut frames = load_hdr_frames(&paths, &app_handle, &settings)?;
+    let decoded_in = stage.elapsed();
     assert_uniform_dimensions(&frames)?;
-    align_hdr_frames(&mut frames, &app_handle);
-
-    let images: Vec<HDRInput> = frames
-        .iter()
-        .map(|(path, img, exposure, gains)| {
-            HDRInput::with_image(img, *exposure, *gains)
-                .map_err(|e| format!("Failed to prepare HDR input for {}: {}", path, e))
-        })
-        .collect::<Result<Vec<HDRInput>, String>>()?;
-
-    log::info!("Starting HDR merge of {} images", images.len());
-    let mut hdr_merged = hdr_merge_images(&mut images.into()).map_err(|e| e.to_string())?;
-    hdr_merged =
-        image_hdr::stretch::apply_histogram_stretch(&hdr_merged).map_err(|e| e.to_string())?;
-    hdr_merged = apply_linear_to_srgb(hdr_merged);
-    log::info!("HDR merge completed");
-
-    let mut buf = Cursor::new(Vec::new());
-    if let Err(e) = hdr_merged.to_rgb8().write_to(&mut buf, ImageFormat::Png) {
-        return Err(format!("Failed to encode hdr preview: {}", e));
+    let stage = std::time::Instant::now();
+    if settings.hdr_auto_align.unwrap_or(false) {
+        align_hdr_frames(&mut frames, &app_handle);
+    } else {
+        log::info!("HDR alignment disabled by setting, merging frames as shot");
     }
+    let aligned_in = stage.elapsed();
 
-    let base64_str = general_purpose::STANDARD.encode(buf.get_ref());
-    let final_base64 = format!("data:image/png;base64,{}", base64_str);
+    // ========== BLITZRAW: a clipped pixel is not a measurement ==========
+    // `image_hdr::hdr_merge_images` sums every frame's contribution with no
+    // regard for whether a pixel was blown out in it. That is the estimator
+    // from the paper it cites with the paper's own condition left off: the sum
+    // runs over the observations that are not saturated. A clipped pixel says
+    // "at least this bright" and nothing else, so including it drags the
+    // highlight down, and by different amounts per channel, which is what put a
+    // yellow cast on bright objects whenever the longest frame was overexposed.
+    //
+    // Ours does the same arithmetic with the condition put back. See hdr_merge.
+    log::info!("Starting HDR merge of {} images", frames.len());
+    let stage = std::time::Instant::now();
+    let merged = crate::hdr_merge::merge_loaded(&frames);
+    let merged_in = stage.elapsed();
+    let stage = std::time::Instant::now();
+    // And scaled by what the metered frame called white, rather than by whatever
+    // happened to be brightest in shot. `apply_histogram_stretch` divides by the
+    // largest value in the image, which was survivable only while the merge
+    // crushed its own highlights: once they are right, one clipped lamp at a
+    // hundred times the brightness of the room divides the room by a hundred,
+    // and the corrected merge would have looked far worse than the broken one.
+    // See hdr_merge.
+    let white = crate::hdr_merge::metered_white_of(&frames);
+    log::info!("Merged white point is a radiance of {white:.4}");
+    let mut hdr_merged = DynamicImage::ImageRgb32F(crate::hdr_merge::to_display(&merged, white));
+    // ======== BLITZRAW END: a clipped pixel is not a measurement ========
+    // Everything downstream is display-referred because of this line. The DNG
+    // writer says so in a LinearizationTable; see hdr_dng.
+    hdr_merged = apply_linear_to_srgb(hdr_merged);
+    let toned_in = stage.elapsed();
+
+    // A preview only the modal ever looks at.
+    //
+    // `merge_hdr` built a full-resolution PNG of the merge and base64'd it into
+    // an event whatever the caller was, and the listener that receives it drops
+    // the payload outright while a bulk run is going. So a queue of thirty
+    // brackets spent about a second each encoding an eighty megabyte string,
+    // pushed all 2.4 GB of it across into the webview, and threw every one away
+    // on arrival. The queue awaits the command rather than the event, so it
+    // asks for no preview and nothing downstream notices.
+    let stage = std::time::Instant::now();
+    let final_base64 = if with_preview.unwrap_or(true) {
+        let mut buf = Cursor::new(Vec::new());
+        if let Err(e) = hdr_merged.to_rgb8().write_to(&mut buf, ImageFormat::Png) {
+            return Err(format!("Failed to encode hdr preview: {}", e));
+        }
+        Some(format!(
+            "data:image/png;base64,{}",
+            general_purpose::STANDARD.encode(buf.get_ref())
+        ))
+    } else {
+        None
+    };
+    log::info!(
+        "HDR merge of {} took {:?}: decode {:?}, align {:?}, merge {:?}, tone {:?}, preview {:?} ({})",
+        paths.len(),
+        began.elapsed(),
+        decoded_in,
+        aligned_in,
+        merged_in,
+        toned_in,
+        stage.elapsed(),
+        match &final_base64 {
+            Some(b64) => format!("{:.0} MB of base64", b64.len() as f64 / 1e6),
+            None => "not asked for".to_string(),
+        }
+    );
+    // ============ BLITZRAW END: what each stage of a merge costs ============
 
     let _ = app_handle.emit("hdr-progress", "Creating preview...");
 
     *hdr_result_handle.lock().unwrap() = Some(hdr_merged);
 
+    // Still announced when there is no preview, so anything waiting on the
+    // event rather than on the command still hears that the merge is done.
     let _ = app_handle.emit(
         "hdr-complete",
         serde_json::json!({
@@ -1456,6 +1634,7 @@ async fn merge_hdr(
 #[tauri::command]
 async fn save_hdr(
     first_path_str: String,
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let hdr_image = state.hdr_result.lock().unwrap().take().ok_or_else(|| {
@@ -1471,33 +1650,162 @@ async fn save_hdr(
         .and_then(|s| s.to_str())
         .unwrap_or("hdr");
 
-    let (output_filename, image_to_save): (String, DynamicImage) = if hdr_image.color().has_alpha()
-    {
-        (
-            format!("{}_Hdr.png", stem),
-            DynamicImage::ImageRgba8(hdr_image.to_rgba8()),
-        )
-    } else if hdr_image.as_rgb32f().is_some() {
-        (format!("{}_Hdr.tiff", stem), hdr_image)
+    // ================= BLITZRAW: merges as JPEG XL DNGs =================
+    // The float branch is the real merge, and it used to be written as an
+    // uncompressed 32-bit float TIFF: 545 MB for a Z9 bracket, which is
+    // exactly the pixels with a header on the front. It is a linear DNG with
+    // JPEG XL pixels now, about 20 MB for the same picture, measured. See
+    // hdr_dng for why that is possible without forking anything and what the
+    // quality costs, which is half a display level.
+    //
+    // The other two branches are for merges that are not float, which means
+    // they did not come from raw files, and they keep the format they had.
+    let output_path = if hdr_image.as_rgb32f().is_some() && !hdr_image.color().has_alpha() {
+        let path = parent_dir.join(format!("{}_Hdr.dng", stem));
+        let stage = std::time::Instant::now();
+        crate::hdr_dng::write_linear_jxl_dng(&path, &hdr_image, crate::hdr_dng::DEFAULT_DISTANCE)
+            .map_err(|e| format!("Failed to save hdr image: {}", e))?;
+        log::info!(
+            "Wrote {} in {:?} ({:.1} MB)",
+            path.display(),
+            stage.elapsed(),
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64 / 1e6
+        );
+        path
     } else {
-        (
-            format!("{}_Hdr.png", stem),
-            DynamicImage::ImageRgb8(hdr_image.to_rgb8()),
-        )
+        let (output_filename, image_to_save): (String, DynamicImage) =
+            if hdr_image.color().has_alpha() {
+                (
+                    format!("{}_Hdr.png", stem),
+                    DynamicImage::ImageRgba8(hdr_image.to_rgba8()),
+                )
+            } else {
+                (
+                    format!("{}_Hdr.png", stem),
+                    DynamicImage::ImageRgb8(hdr_image.to_rgb8()),
+                )
+            };
+        let path = parent_dir.join(output_filename);
+        image_to_save
+            .save(&path)
+            .map_err(|e| format!("Failed to save hdr image: {}", e))?;
+        path
     };
-
-    let output_path = parent_dir.join(output_filename);
-
-    image_to_save
-        .save(&output_path)
-        .map_err(|e| format!("Failed to save hdr image: {}", e))?;
+    // =============== BLITZRAW END: merges as JPEG XL DNGs ===============
 
     let (real_path, _) = crate::file_management::parse_virtual_path(&first_path_str);
     let _ =
         crate::exif_processing::write_rrexif_sidecar(&real_path.to_string_lossy(), &output_path);
 
+    // ============== BLITZRAW: real white balance, in Kelvin ==============
+    // The merge output is a TIFF and carries no camera calibration of its own,
+    // so without this it falls back to the old relative tint and the Kelvin
+    // slider disappears the moment you merge a bracket.
+    //
+    // Its pixels are the as-shot render of frames that did have a calibration,
+    // and the merge is linear in them: the exposures are combined in linear
+    // light and the histogram stretch that follows is one scale and offset
+    // applied to every channel alike. So the same white balance matrix applies
+    // to the merged file exactly as it did to its inputs, provided the profile
+    // travels with it. Nothing here is approximated.
+    crate::camera_profile::inherit_profile(&real_path.to_string_lossy(), &output_path);
+    // ============ BLITZRAW END: real white balance, in Kelvin ============
+
+    // Last, because both caches key on the written file's modification time and
+    // on the sidecar beside it, and everything above still changes those.
+    warm_caches_for_merge(hdr_image, &output_path, &app_handle, &state);
+
     Ok(output_path.to_string_lossy().to_string())
 }
+
+// ========== BLITZRAW: render a merge's previews while it is in memory ==========
+/// Renders what a merge is about to be asked for, before it is asked.
+///
+/// A merge is written and then looked at straight away, so the library asks for
+/// a thumbnail and the editor asks for a preview, and each of those was a fresh
+/// decode of the file just written: about 1.6s apiece on a 45 megapixel DNG,
+/// paid twice per bracket on top of a merge that already cost twenty seconds.
+/// The picture is still in memory here, so both come from it and neither costs
+/// a decode.
+///
+/// A preloaded image has to be in the space the decode would have produced, or
+/// the render is wrong in exactly the way every merge was wrong before the
+/// linearization table, and cached that way. `hdr_dng::as_decoded` is what puts
+/// it there, and is checked against a real round trip by its own test.
+///
+/// Both caches key on the written file and its sidecar in the ordinary way, so
+/// what is left here is found by an ordinary lookup. Nothing downstream needs
+/// to know a merge put it there.
+///
+/// Every failure is logged and swallowed. A cache that was not warmed costs a
+/// decode later, which is what happened every time before this.
+fn warm_caches_for_merge(
+    merged: DynamicImage,
+    output_path: &std::path::Path,
+    app_handle: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+) {
+    let began = std::time::Instant::now();
+    let path_str = output_path.to_string_lossy().to_string();
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let preview_width = settings
+        .editor_preview_resolution
+        .unwrap_or(1920)
+        .clamp(320, 8192);
+
+    let preloaded = crate::hdr_dng::as_decoded(merged, output_path);
+
+    let gpu_context = crate::gpu_processing::get_or_init_gpu_context(state, app_handle).ok();
+    let rendered = match crate::file_management::generate_thumbnail_data(
+        &path_str,
+        gpu_context.as_ref(),
+        Some(&preloaded),
+        app_handle,
+        Some(preview_width),
+    ) {
+        Ok(image) => image,
+        Err(e) => {
+            log::warn!("Could not render the previews for {path_str}: {e}");
+            return;
+        }
+    };
+    // The full-size copy has done its job and is the largest thing here.
+    drop(preloaded);
+
+    let mut stored = Vec::new();
+    match crate::preview_cache::store_rendered_preview(&path_str, &rendered, preview_width) {
+        Ok(_) => stored.push(format!("{preview_width}px preview")),
+        Err(e) => log::warn!("Could not store the preview for {path_str}: {e}"),
+    }
+    match crate::file_management::store_rendered_thumbnail(&path_str, &rendered, app_handle) {
+        Ok(written) => {
+            stored.push("thumbnail".to_string());
+            // BLITZRAW: and say so.
+            //
+            // Writing the file is not enough. A thumbnail keeps one name for
+            // the life of the photo, so the address the grid is already showing
+            // does not change when the file behind it does, and the front end
+            // only reaches for a new one when it is told. Merging a bracket a
+            // second time over an existing result therefore wrote a correct new
+            // thumbnail that nobody ever looked at, and the grid kept the old
+            // picture until the app was restarted.
+            crate::file_management::announce_new_thumbnail(app_handle, &path_str, &written);
+        }
+        Err(e) => log::warn!("Could not store the thumbnail for {path_str}: {e}"),
+    }
+
+    if stored.is_empty() {
+        log::warn!("Warmed nothing for {path_str}");
+    } else {
+        log::info!(
+            "Warmed the {} for {} in {:?}",
+            stored.join(" and the "),
+            path_str,
+            began.elapsed()
+        );
+    }
+}
+// ======== BLITZRAW END: render a merge's previews while it is in memory ========
 
 #[tauri::command]
 async fn save_collage(base64_data: String, first_path_str: String) -> Result<String, String> {
@@ -1630,6 +1938,75 @@ async fn generate_preview_for_path(
     .map_err(|e| format!("Task execution failed: {}", e))?
 }
 
+/// Where this run is actually logging, once that is settled.
+///
+/// Not derived a second time by whoever asks: the file in use is not always
+/// `app.log`, and answering with a guess is how the last problem hid.
+static LOG_FILE_IN_USE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// How many sessions of logs are kept, including the one running.
+const LOGS_KEPT: usize = 10;
+
+/// Every log file this app has written, oldest first.
+///
+/// Matched by prefix rather than by an exact name, so the numbered files an
+/// earlier scheme left behind are pruned by the same rule.
+///
+/// Ordered by modification time, then by name. Two files written in the same
+/// clock tick would otherwise come back in whatever order the directory gave
+/// them, and the name carries the start time, so it breaks the tie correctly.
+fn log_files_oldest_first(log_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("app") && name.ends_with(".log"))
+        })
+        .filter_map(|path| {
+            let modified = path.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Deletes the oldest logs until only `LOGS_KEPT` remain.
+///
+/// Run after the new file exists, so the session starting is the newest one and
+/// cannot delete itself. Failures are ignored: a log that will not delete is
+/// clutter, not a reason to start without logging.
+fn prune_logs(log_dir: &std::path::Path) {
+    let files = log_files_oldest_first(log_dir);
+    let excess = files.len().saturating_sub(LOGS_KEPT);
+    for path in files.into_iter().take(excess) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// A file of its own for this session, named for when it started.
+///
+/// One file per run rather than one file reused. Reusing it meant a second
+/// instance could not open it at all and fell back to console only, and it
+/// meant the run worth reading was erased by the restart that followed it. A
+/// name carrying the start time also makes "the log from the merge I ran at
+/// nine" something you can pick out of the folder by eye.
+fn session_log_path(log_dir: &std::path::Path) -> std::path::PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let plain = log_dir.join(format!("app-{stamp}.log"));
+    if plain.exists() {
+        // Two instances inside the same second. Rare, and the loser would
+        // otherwise truncate the winner's log on the way in.
+        return log_dir.join(format!("app-{stamp}-pid{}.log", std::process::id()));
+    }
+    plain
+}
+
 fn setup_logging(app_handle: &tauri::AppHandle) {
     let log_dir = match app_handle.path().app_log_dir() {
         Ok(dir) => dir,
@@ -1643,8 +2020,9 @@ fn setup_logging(app_handle: &tauri::AppHandle) {
         eprintln!("Failed to create log directory at {:?}: {}", log_dir, e);
     }
 
-    let log_file_path = log_dir.join("app.log");
-
+    // This session gets a file of its own. Nothing another instance holds can
+    // block it, and nothing worth reading is erased by the next restart.
+    let log_file_path = session_log_path(&log_dir);
     let log_file = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -1652,10 +2030,28 @@ fn setup_logging(app_handle: &tauri::AppHandle) {
         .open(&log_file_path)
         .ok();
 
+    if log_file.is_some() {
+        prune_logs(&log_dir);
+    }
+
     let var = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
     let level: log::LevelFilter = var.parse().unwrap_or(log::LevelFilter::Info);
 
-    let mut dispatch = fern::Dispatch::new()
+    let writing_to_file = log_file.is_some();
+    if writing_to_file {
+        let _ = LOG_FILE_IN_USE.set(log_file_path.clone());
+    } else {
+        eprintln!(
+            "Failed to open a log file in {:?}. Logging to console only.",
+            log_dir
+        );
+    }
+
+    // One sink for both the file and the console, on a thread of its own.
+    // Chaining stderr directly meant every log call wrote to a pipe from
+    // whatever thread made it, and a pipe the dev launcher stops draining
+    // blocks the writer. See log_sink.
+    let dispatch = fern::Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
                 "{} [{}] {}",
@@ -1665,19 +2061,28 @@ fn setup_logging(app_handle: &tauri::AppHandle) {
             ))
         })
         .level(level)
-        .chain(std::io::stderr());
-
-    if let Some(file) = log_file {
-        dispatch = dispatch.chain(file);
-    } else {
-        eprintln!(
-            "Failed to open log file at {:?}. Logging to console only.",
-            log_file_path
-        );
-    }
+        .chain(Box::new(crate::log_sink::NonBlockingSink::start(log_file))
+            as Box<dyn std::io::Write + Send>);
 
     if let Err(e) = dispatch.apply() {
         eprintln!("Failed to apply logger configuration: {}", e);
+    }
+
+    // Reported here because it is the one place that runs after the logger is
+    // live and before anything interesting has happened, so a non-zero count
+    // means the very start of the run was already too noisy for the console.
+    let dropped = crate::log_sink::dropped_records();
+    if dropped > 0 {
+        log::warn!("{dropped} log records were dropped while the logger was starting");
+    }
+
+    if !writing_to_file {
+        // Said through the logger as well, so it appears in whatever console
+        // is being watched rather than only in stderr at startup.
+        log::warn!(
+            "No log file could be opened in {:?}. This session is console only.",
+            log_dir
+        );
     }
 
     panic::set_hook(Box::new(|info| {
@@ -1695,6 +2100,12 @@ fn setup_logging(app_handle: &tauri::AppHandle) {
         log::error!("PANIC! {} - {}", location, message.trim());
     }));
 
+    // Said here rather than where it is decided. The data directory is settled
+    // before the logger exists, because the logger reads settings to know where
+    // to write and settings live in the directory being chosen, so that line
+    // went to a logger that was not listening. See data_dir.rs.
+    crate::data_dir::report_choice(app_handle);
+
     log::info!(
         "Logger initialized successfully. Log file at: {:?}",
         log_file_path
@@ -1703,9 +2114,17 @@ fn setup_logging(app_handle: &tauri::AppHandle) {
 
 #[tauri::command]
 fn get_log_file_path(app_handle: tauri::AppHandle) -> Result<String, String> {
+    // Whatever this run settled on, which is not always app.log.
+    if let Some(path) = LOG_FILE_IN_USE.get() {
+        return Ok(path.to_string_lossy().to_string());
+    }
+    // No file this session, so offer the most recent one there is rather than
+    // a name that may never have existed.
     let log_dir = app_handle.path().app_log_dir().map_err(|e| e.to_string())?;
-    let log_file_path = log_dir.join("app.log");
-    Ok(log_file_path.to_string_lossy().to_string())
+    match log_files_oldest_first(&log_dir).pop() {
+        Some(newest) => Ok(newest.to_string_lossy().to_string()),
+        None => Ok(log_dir.to_string_lossy().to_string()),
+    }
 }
 
 #[tauri::command]
@@ -1741,6 +2160,41 @@ struct MonitorBounds {
     width: u32,
     height: u32,
 }
+
+// ============ BLITZRAW: the window that opened small ============
+/// Whether what the window is currently reporting about itself should be
+/// written down. Three reasons it should not, and each one produced the same
+/// symptom: an application that opened small having been closed maximised.
+///
+/// - **Before the restore.** Setup sizes and positions the window from the file
+///   before anything has maximised it, and those calls fire Resized and Moved.
+///   Saving then writes `maximized: false` over the answer the restore has not
+///   read yet. On a fast start the restore wins the race; on a slow one, which
+///   is every start after a rebuild, it does not.
+/// - **While closing.** Windows sends a last Resized as a window is destroyed,
+///   and a maximised window does not always still report itself as maximised by
+///   then.
+/// - **While minimised.** A minimised window's size and position are not where
+///   the user left it either.
+fn window_state_is_worth_saving(restored: bool, closing: bool, minimized: bool) -> bool {
+    restored && !closing && !minimized
+}
+
+/// Writes whatever window state is pending, now, instead of waiting for the
+/// saver's next turn. Called as the window closes: the saver runs every 500 ms
+/// and the process does not always last that long.
+fn flush_window_state(app_handle: &tauri::AppHandle, pending: &Arc<Mutex<Option<WindowState>>>) {
+    let Some(state) = pending.lock().unwrap().take() else {
+        return;
+    };
+    // BLITZRAW: one data directory, chosen and proved. See data_dir.rs.
+    let dir = crate::data_dir::data_dir(app_handle);
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(json) = serde_json::to_string(&state) {
+        let _ = std::fs::write(dir.join("window_state.json"), json);
+    }
+}
+// ========== BLITZRAW END: the window that opened small ==========
 
 fn saved_window_state_is_usable(state: &WindowState, monitors: &[MonitorBounds]) -> bool {
     if state.width < 800 || state.height < 600 {
@@ -1815,15 +2269,24 @@ fn frontend_ready(
         #[cfg(any(windows, target_os = "linux"))]
         let mut should_fullscreen = false;
         #[cfg(not(any(windows, target_os = "linux")))]
-        let _ = (&app_handle, is_first_run);
+        let _ = is_first_run;
+        // BLITZRAW: the window state no longer comes from a file read here, so
+        // on the desktop targets nothing in this function needs the handle. It
+        // stays in the signature because Tauri injects it and other targets use
+        // it.
+        let _ = &app_handle;
 
         #[cfg(any(windows, target_os = "linux"))]
-        if is_first_run && let Ok(config_dir) = app_handle.path().app_config_dir() {
-            let path = config_dir.join("window_state.json");
+        // BLITZRAW: the state as it was on disk when the application started,
+        // not as it is now. Re-reading the file here is what made the window
+        // open small: setup's own set_size and set_position fire Resized and
+        // Moved, and the saver had already written a not-yet-maximised window
+        // over the answer. A slow start, which is every start after a rebuild,
+        // loses the race every time.
+        if is_first_run {
+            let saved = *state.startup_window_state.lock().unwrap();
 
-            if let Ok(contents) = std::fs::read_to_string(&path)
-                && let Ok(saved_state) = serde_json::from_str::<WindowState>(&contents)
-            {
+            if let Some(saved_state) = saved {
                 #[cfg(any(windows, target_os = "linux"))]
                 {
                     should_maximize = saved_state.maximized;
@@ -1868,12 +2331,30 @@ fn frontend_ready(
         }
         #[cfg(any(windows, target_os = "linux"))]
         if is_first_run {
+            // Reported because a window that opens small when it was closed
+            // maximised has three possible explanations, and only the log can
+            // say which: the file was not read, it was read and said no, or it
+            // said yes and the call did not take.
+            log::info!(
+                "Window restore: first run, saved state says maximized={should_maximize} fullscreen={should_fullscreen}"
+            );
             if should_maximize {
-                let _ = window.maximize();
+                if let Err(e) = window.maximize() {
+                    log::warn!("Could not maximize the window: {e}");
+                } else {
+                    log::info!("Window maximized, now {:?}", window.is_maximized());
+                }
             }
             if should_fullscreen {
                 let _ = window.set_fullscreen(true);
             }
+            // BLITZRAW: only now is the window where the user left it, so only
+            // now is what it reports worth writing down.
+            state
+                .window_state_restored
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            log::info!("Window restore skipped: frontend_ready has already run this session");
         }
     }
 
@@ -1937,6 +2418,19 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(PinchZoomDisablePlugin)
         .on_window_event(|window, event| if let tauri::WindowEvent::Resized(size) = event {
+            // ============ BLITZRAW: only the window the picture is in ============
+            // This is registered on the builder, so it runs for every window in
+            // the application, and the photograph is drawn by a native wgpu
+            // surface attached to `main` alone. Without this line, resizing a
+            // detached panel window reconfigured the main window's surface to
+            // the panel's size: the picture appeared squeezed into a strip of
+            // the shape of the other window, and grew and shrank in mirror
+            // image as it was dragged. Harmless while there was only ever one
+            // window, which is why it was here to be found.
+            if window.label() != "main" {
+                return;
+            }
+            // ========== BLITZRAW END: only the window the picture is in ==========
             let state = window.state::<AppState>();
             if let Some(ctx) = state.gpu_context.lock().unwrap().as_ref()
                 && let Ok(mut display_lock) = ctx.display.try_lock()
@@ -1976,7 +2470,8 @@ pub fn run() {
                 });
             }
 
-            let config_dir = app_handle.path().app_config_dir().expect("Failed to get config dir");
+            // BLITZRAW: one data directory, chosen and proved. See data_dir.rs.
+            let config_dir = crate::data_dir::data_dir(&app_handle);
             let crash_flag_path = config_dir.join(".gpu_init_crash_flag");
 
             {
@@ -2041,6 +2536,21 @@ pub fn run() {
                     let ort_library_path = resource_path.join(ort_library_name);
                     std::env::set_var("ORT_DYLIB_PATH", &ort_library_path);
                     println!("Set ORT_DYLIB_PATH to: {}", ort_library_path.display());
+
+                    // BLITZRAW: the runtime is loaded by full path, but the
+                    // DirectML library it needs is looked for the ordinary way,
+                    // which does not include the folder the runtime came from.
+                    // Without this the load fails with nothing but "the
+                    // specified module could not be found", naming the runtime
+                    // rather than the file that is actually missing.
+                    #[cfg(target_os = "windows")]
+                    {
+                        let existing = std::env::var("PATH").unwrap_or_default();
+                        let resources = resource_path.to_string_lossy().to_string();
+                        if !existing.split(';').any(|p| p == resources) {
+                            std::env::set_var("PATH", format!("{resources};{existing}"));
+                        }
+                    }
                 }
             }
 
@@ -2122,12 +2632,33 @@ pub fn run() {
                     );
                 }
 
-                if let Ok(config_dir) = app.path().app_config_dir() {
-                    let path = config_dir.join("window_state.json");
-                    if let Ok(contents) = std::fs::read_to_string(&path) {
-                        if let Ok(state) = serde_json::from_str::<WindowState>(&contents) {
+                // BLITZRAW: one data directory, chosen and proved. See data_dir.rs.
+                //
+                // Read once, and kept, because the calls just below fire Resized
+                // and Moved and the saver would write over the answer before
+                // `frontend_ready` had a chance to use it. That is the whole of
+                // the window-opens-small bug.
+                {
+                    let path = crate::data_dir::data_path(app.handle(), "window_state.json");
+                    let saved = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|contents| serde_json::from_str::<WindowState>(&contents).ok());
+
+                    *app.state::<AppState>().startup_window_state.lock().unwrap() = saved;
+
+                    match saved {
+                        Some(state) => {
                             let monitor_bounds = available_monitor_bounds(&window);
                             if saved_window_state_is_usable(&state, &monitor_bounds) {
+                                log::info!(
+                                    "Window state on disk: {}x{} at {},{} maximized={} fullscreen={}",
+                                    state.width,
+                                    state.height,
+                                    state.x,
+                                    state.y,
+                                    state.maximized,
+                                    state.fullscreen
+                                );
                                 let _ = window.set_size(tauri::Size::Physical(
                                     tauri::PhysicalSize::new(state.width, state.height),
                                 ));
@@ -2144,14 +2675,12 @@ pub fn run() {
                                 );
                                 let _ = window.center();
                             }
-                        } else {
+                        }
+                        None => {
+                            log::info!("No usable window state on disk, centering");
                             let _ = window.center();
                         }
-                    } else {
-                        let _ = window.center();
                     }
-                } else {
-                    let _ = window.center();
                 }
 
                 let window_failsafe = window.clone();
@@ -2163,6 +2692,30 @@ pub fn run() {
                         );
                         let _ = window_failsafe.show();
                         let _ = window_failsafe.set_focus();
+
+                        // BLITZRAW: showing it small and maximising it ten
+                        // seconds later when the front end finally answers is
+                        // still the window opening small, as far as anyone
+                        // watching is concerned. The remembered state is right
+                        // here, so use it.
+                        #[cfg(any(windows, target_os = "linux"))]
+                        {
+                            let handle = window_failsafe.app_handle().clone();
+                            let saved = *handle.state::<AppState>().startup_window_state.lock().unwrap();
+                            if let Some(saved) = saved {
+                                if saved.maximized {
+                                    let _ = window_failsafe.maximize();
+                                }
+                                if saved.fullscreen {
+                                    let _ = window_failsafe.set_fullscreen(true);
+                                }
+                                log::info!(
+                                    "Failsafe restored the window: maximized={} fullscreen={}",
+                                    saved.maximized,
+                                    saved.fullscreen
+                                );
+                            }
+                        }
                     }
                 });
 
@@ -2179,10 +2732,9 @@ pub fn run() {
                             lock.take()
                         };
 
-                        if let Some(state) = state_to_save
-                            && let Ok(config_dir) =
-                                app_handle_for_saver.path().app_config_dir()
-                        {
+                        // BLITZRAW: one data directory, chosen and proved.
+                        if let Some(state) = state_to_save {
+                            let config_dir = crate::data_dir::data_dir(&app_handle_for_saver);
                             let path = config_dir.join("window_state.json");
                             let _ = std::fs::create_dir_all(&config_dir);
                             if let Ok(json) = serde_json::to_string(&state) {
@@ -2195,8 +2747,60 @@ pub fn run() {
                 let window_for_handler = window.clone();
                 let pending_state_for_handler = pending_window_state.clone();
 
+                let closing_handle = window.app_handle().clone();
+
                 window.on_window_event(move |event| match event {
+                    // ========== BLITZRAW: the panel windows go with it ==========
+                    // Tauri keeps the process alive while any window is open, so
+                    // closing the main window while a panel window was out left
+                    // the application running with nothing to run it from, and
+                    // the terminal had to be killed. The panel windows belong to
+                    // this one and have nothing to show without it.
+                    tauri::WindowEvent::CloseRequested { .. } => {
+                        // BLITZRAW: Windows sends one last Resized as a window
+                        // is destroyed, and a maximised window does not always
+                        // still report itself as maximised by then. Whatever is
+                        // pending now is the truth; nothing after this is.
+                        closing_handle
+                            .state::<AppState>()
+                            .window_closing
+                            .store(true, Ordering::SeqCst);
+                        flush_window_state(&closing_handle, &pending_state_for_handler);
+                        crate::panel_window::close_every_panel_window(&closing_handle);
+                    }
+                    // ======== BLITZRAW END: the panel windows go with it ========
+                    // ====== BLITZRAW: the two windows travel together ======
+                    // Coming back to the photo brings its panels with it. On
+                    // Windows the owner relationship set up in panel_window.rs
+                    // already does this; this covers the case where that could
+                    // not be established, and it costs nothing when it did.
+                    tauri::WindowEvent::Focused(true) => {
+                        crate::panel_window::bring_panels_forward(&closing_handle);
+                    }
+                    // ==== BLITZRAW END: the two windows travel together ====
                     tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
+                        // ==== BLITZRAW: the panels go to the other screen ====
+                        // Only when the photo has actually changed screens, and
+                        // only when the panels are on the same one. A move
+                        // within a screen, which is most moves, gets as far as
+                        // the comparison below and no further.
+                        crate::window_places::keep_panels_off_the_photo(&closing_handle);
+                        // == BLITZRAW END: the panels go to the other screen ==
+
+                        // BLITZRAW: three reasons a window's own report of
+                        // itself is not worth writing down. See
+                        // `window_state_is_worth_saving`.
+                        {
+                            let state = window_for_handler.app_handle().state::<AppState>();
+                            if !window_state_is_worth_saving(
+                                state.window_state_restored.load(Ordering::SeqCst),
+                                state.window_closing.load(Ordering::SeqCst),
+                                window_for_handler.is_minimized().unwrap_or(false),
+                            ) {
+                                return;
+                            }
+                        }
+
                         #[cfg(any(windows, target_os = "linux"))]
                         let maximized = window_for_handler.is_maximized().unwrap_or(false);
                         #[cfg(not(any(windows, target_os = "linux")))]
@@ -2206,10 +2810,6 @@ pub fn run() {
                         let fullscreen = window_for_handler.is_fullscreen().unwrap_or(false);
                         #[cfg(not(any(windows, target_os = "linux")))]
                         let fullscreen = false;
-
-                        if window_for_handler.is_minimized().unwrap_or(false) {
-                            return;
-                        }
 
                         let mut state = WindowState {
                             width: 1280,
@@ -2241,11 +2841,27 @@ pub fn run() {
                 });
             }
 
+            // BLITZRAW: thumbnails written under the old flat layout cannot be
+            // reached any more and cannot be attributed to an image either, so
+            // they are cleared once. Costs one directory listing on every start
+            // after that, when there is nothing left at the top level to find.
+            {
+                let sweeping = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::file_management::sweep_legacy_thumbnails(&sweeping);
+                });
+            }
+
             crate::register_exit_handler();
             Ok(())
         })
         .manage(AppState {
             window_setup_complete: AtomicBool::new(false),
+            // BLITZRAW: read once at setup, so the saver cannot overwrite the
+            // answer before the restore gets to use it.
+            startup_window_state: Mutex::new(None),
+            window_state_restored: AtomicBool::new(false),
+            window_closing: AtomicBool::new(false),
             gpu_crash_flag_path: Mutex::new(None),
             original_image: Mutex::new(None),
             cached_preview: Mutex::new(None),
@@ -2275,12 +2891,16 @@ pub fn run() {
             full_warped_cache: Mutex::new(None),
             full_transformed_cache: Mutex::new(None),
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
+            apply_adjustments_generation: Arc::new(AtomicUsize::new(0)),
             thumbnail_manager: ThumbnailManager::new(),
             metadata_manager: MetadataManager::new(),
             disks_cache: Mutex::new(None),
             disks_cache_refreshing: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
+            // BLITZRAW: as-shot Kelvin and tint, for the white balance panel.
+            crate::camera_profile::get_white_balance_info,
+            crate::camera_profile::pick_white_balance,
             apply_adjustments,
             generate_preview_for_path,
             generate_original_transformed_preview,
@@ -2321,6 +2941,7 @@ pub fn run() {
             inpainting::generate_manual_cleanup_patch,
             denoising::apply_denoising,
             denoising::batch_denoise_images,
+            denoising::denoise_preview_patch,
             denoising::save_denoised_image,
             image_loader::load_image,
             image_loader::is_image_cached,
@@ -2336,6 +2957,23 @@ pub fn run() {
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::list_images_recursive,
+            nef_compression::probe_raw_compression,
+            panel_window::open_floating_window,
+            panel_window::close_floating_window,
+            panel_window::panel_window_ready,
+            panel_window::floating_window_is_open,
+            // BLITZRAW: where the windows sit, so a layout profile can put
+            // them back. See window_places.rs.
+            window_places::get_window_places,
+            window_places::apply_window_places,
+            auto_stack::preview_auto_stacks,
+            auto_stack::preview_burst_stacks,
+            bulk_hdr::hdr_outputs_present,
+            stacks::set_stacks,
+            stacks::set_stack_leader,
+            stacks::clear_stacks,
+            dng_convert::find_dng_converter,
+            dng_convert::convert_to_dng,
             file_management::get_folder_tree,
             file_management::get_folder_children,
             file_management::get_pinned_folder_trees,
@@ -2346,11 +2984,24 @@ pub fn run() {
             file_management::move_files,
             file_management::rename_folder,
             file_management::rename_files,
+            file_management::nudge_adjustments_for_paths,
+            file_management::go_to_steps,
+            preview_cache::build_previews_for_paths,
+            preview_cache::discard_previews_for_paths,
+            preview_cache::cached_preview_for_path,
+            preview_cache::count_cached_previews,
             file_management::duplicate_file,
             file_management::show_in_finder,
             file_management::delete_files_from_disk,
             file_management::delete_files_with_associated,
             file_management::save_metadata_and_update_thumbnail,
+            // BLITZRAW: pin the state an export sent out.
+            file_management::pin_exported_state,
+            // BLITZRAW: scopes from the preview or thumbnail, before any decode.
+            file_management::scopes_from_small_picture,
+            // BLITZRAW: a nudge on the small picture, while the raw decodes.
+            proxy_preview::render_nudged_preview,
+            proxy_preview::forget_nudged_source,
             file_management::apply_adjustments_to_paths,
             file_management::load_metadata,
             file_management::load_presets,
@@ -2420,4 +3071,140 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+// ============ BLITZRAW: the window that opened small ============
+#[cfg(test)]
+mod window_state_tests {
+    use super::window_state_is_worth_saving;
+
+    #[test]
+    fn a_settled_window_is_saved() {
+        assert!(window_state_is_worth_saving(true, false, false));
+    }
+
+    #[test]
+    fn nothing_is_saved_before_the_restore_has_run() {
+        // The bug this whole thing exists for. Setup's own set_size and
+        // set_position fire Resized and Moved while the window is still the
+        // wrong size, and saving then overwrites the answer the restore is
+        // about to read.
+        assert!(!window_state_is_worth_saving(false, false, false));
+    }
+
+    #[test]
+    fn nothing_is_saved_once_the_window_is_closing() {
+        // Windows sends a last Resized as a window is destroyed, by which time
+        // a maximised window may no longer say it is maximised.
+        assert!(!window_state_is_worth_saving(true, true, false));
+    }
+
+    #[test]
+    fn a_minimized_window_is_not_where_the_user_left_it() {
+        assert!(!window_state_is_worth_saving(true, false, true));
+    }
+}
+// ========== BLITZRAW END: the window that opened small ==========
+
+#[cfg(test)]
+mod logging_tests {
+    use super::{LOGS_KEPT, log_files_oldest_first, prune_logs};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Stands in for one app start: make this session a file, then prune.
+    ///
+    /// Stamped rather than left to the clock, because several sessions in one
+    /// tick would make the order the test asserts depend on the tiebreak alone.
+    fn start_a_session(dir: &std::path::Path, index: usize, body: &str) {
+        let path = dir.join(format!("app-{index:04}.log"));
+        std::fs::write(&path, body).expect("write");
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time(1_600_000_000 + index as i64, 0),
+        )
+        .expect("stamp");
+        prune_logs(dir);
+    }
+
+    /// The log of the run worth reading has to survive the restart that follows
+    /// it, and the folder has to stop growing.
+    ///
+    /// One file was reused and truncated at startup, so asking "how long did
+    /// that bulk merge take" after reopening the app read a file describing the
+    /// reopening. Twice that had to be answered out of file modification times
+    /// instead.
+    #[test]
+    fn every_session_gets_its_own_log_and_the_oldest_are_dropped() {
+        let dir = scratch("blitzraw-log-sessions");
+        let sessions = LOGS_KEPT + 4;
+
+        for session in 0..sessions {
+            start_a_session(&dir, session, &format!("session {session}"));
+        }
+
+        let kept = log_files_oldest_first(&dir);
+        assert_eq!(kept.len(), LOGS_KEPT, "the folder stops at {LOGS_KEPT}");
+
+        let read = |path: &std::path::PathBuf| std::fs::read_to_string(path).expect("kept");
+        assert_eq!(
+            read(kept.last().expect("newest")),
+            format!("session {}", sessions - 1),
+            "the session that just started is there"
+        );
+        assert_eq!(
+            read(kept.first().expect("oldest")),
+            format!("session {}", sessions - LOGS_KEPT),
+            "and the oldest kept is exactly {LOGS_KEPT} sessions back"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Files from the numbered scheme this replaced are pruned by the same rule
+    /// rather than sitting in the folder forever.
+    #[test]
+    fn logs_from_the_old_naming_are_swept_up_too() {
+        let dir = scratch("blitzraw-log-legacy");
+        for (index, name) in ["app.log", "app.1.log", "app.2.log", "app.3.log"]
+            .iter()
+            .enumerate()
+        {
+            let path = dir.join(name);
+            std::fs::write(&path, "old").expect("write");
+            filetime::set_file_mtime(
+                &path,
+                filetime::FileTime::from_unix_time(1_500_000_000 + index as i64, 0),
+            )
+            .expect("stamp");
+        }
+        assert_eq!(log_files_oldest_first(&dir).len(), 4, "all four are seen");
+
+        for session in 0..LOGS_KEPT {
+            start_a_session(&dir, session, "new");
+        }
+
+        let kept = log_files_oldest_first(&dir);
+        assert_eq!(kept.len(), LOGS_KEPT);
+        assert!(
+            kept.iter()
+                .all(|path| std::fs::read_to_string(path).expect("kept") == "new"),
+            "nothing from the old scheme is left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder with no logs is the first run ever, not an error.
+    #[test]
+    fn the_first_run_has_nothing_to_prune() {
+        let dir = scratch("blitzraw-log-empty");
+        prune_logs(&dir);
+        assert!(log_files_oldest_first(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

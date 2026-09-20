@@ -2413,7 +2413,7 @@ fn generate_single_thumbnail_and_cache(
         )
     };
 
-    let cache_path = thumbnail_path_for(&thumb_cache_dir, path_str);
+    let cache_path = thumbnail_path_for(thumb_cache_dir, path_str);
 
     if !force_regenerate
         && cache_path.exists()
@@ -3934,29 +3934,11 @@ pub fn save_metadata_and_update_thumbnail(
     // BLITZRAW: which numbers this write moved the photo between, so the
     // application can record one entry and undo it later without holding a
     // single value of its own.
-    Ok(stepped.get().map(|(from, to)| StepMoved {
-        path,
-        from,
-        to,
-    }))
+    Ok(stepped.get().map(|(from, to)| StepMoved { path, from, to }))
 }
 
 // ================== BLITZRAW: quick adjustments ==================
 
-/// Nudges one adjustment on a set of files without opening any of them.
-///
-/// Quick Adjustments works on the live image in the editor, but its point is
-/// the grid: run down a shoot bumping exposure a tenth at a time without
-/// stopping to open anything. That means a read, modify and write per file
-/// rather than one value pushed to all of them, since each starts somewhere
-/// different.
-///
-/// `path` is dotted, so nested settings such as `whiteBalance.kelvin` are
-/// reachable. `fallback` is what to use when a file has never had the setting
-/// touched, since defaults live in the front end.
-///
-/// White balance is the exception: absent means as-shot, which is a property of
-/// the file rather than a constant, so it is read from the camera profile.
 // ============ BLITZRAW: moving photos to the steps they were on ============
 // The other half of an application level undo. The application knows the order
 // things were done in and, for each photo, the number it moved from and the
@@ -4079,6 +4061,20 @@ pub async fn go_to_steps(
 }
 // ========== BLITZRAW END: moving photos to the steps they were on ==========
 
+/// Nudges one adjustment on a set of files without opening any of them.
+///
+/// Quick Adjustments works on the live image in the editor, but its point is
+/// the grid: run down a shoot bumping exposure a tenth at a time without
+/// stopping to open anything. That means a read, modify and write per file
+/// rather than one value pushed to all of them, since each starts somewhere
+/// different.
+///
+/// `path` is dotted, so nested settings such as `whiteBalance.kelvin` are
+/// reachable. `fallback` is what to use when a file has never had the setting
+/// touched, since defaults live in the front end.
+///
+/// White balance is the exception: absent means as-shot, which is a property of
+/// the file rather than a constant, so it is read from the camera profile.
 #[tauri::command]
 pub async fn nudge_adjustments_for_paths(
     paths: Vec<String>,
@@ -4144,9 +4140,7 @@ pub async fn nudge_adjustments_for_paths(
                     }
                 });
 
-                let Some(current) = current else {
-                    return None;
-                };
+                let current = current?;
                 let next = nudged_value(current, delta, min, max);
                 if (next - current).abs() < 1e-9 {
                     return None;
@@ -6261,7 +6255,10 @@ mod camera_rating_tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         let written_again = write_synced_fields(&sidecar, &synced).expect("asked");
 
-        assert!(written_again.is_none(), "nothing moved, so nothing was written");
+        assert!(
+            written_again.is_none(),
+            "nothing moved, so nothing was written"
+        );
         assert_eq!(first, fs::metadata(&sidecar).unwrap().modified().unwrap());
     }
 

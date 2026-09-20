@@ -68,11 +68,11 @@ use std::io::BufWriter;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use rayon::prelude::*;
 use image::DynamicImage;
 use rawler::formats::tiff::writer::{DirectoryWriter, TiffWriter};
 use rawler::formats::tiff::{CompressionMethod, PhotometricInterpretation};
 use rawler::tags::{DngTag, TiffCommonTag};
+use rayon::prelude::*;
 
 /// Butteraugli distance the merges are written at.
 ///
@@ -219,7 +219,12 @@ pub fn write_linear_jxl_dng(path: &Path, image: &DynamicImage, distance: f32) ->
             let tile = extract_tile(&rgb16, index % columns, index / columns);
             let bytes: &[u8] = bytemuck::cast_slice(tile.as_slice());
             jxl_encoder::LossyConfig::new(distance)
-                .encode(bytes, TILE_WIDTH, TILE_HEIGHT, jxl_encoder::PixelLayout::Rgb16)
+                .encode(
+                    bytes,
+                    TILE_WIDTH,
+                    TILE_HEIGHT,
+                    jxl_encoder::PixelLayout::Rgb16,
+                )
                 .map_err(|e| anyhow!("JPEG XL encode failed: {e}"))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -229,7 +234,11 @@ pub fn write_linear_jxl_dng(path: &Path, image: &DynamicImage, distance: f32) ->
     // a preview several times the size of the picture.
     let thumb_edge = THUMBNAIL_EDGE.min(width.max(height));
     let thumbnail = image
-        .resize(thumb_edge, thumb_edge, image::imageops::FilterType::Triangle)
+        .resize(
+            thumb_edge,
+            thumb_edge,
+            image::imageops::FilterType::Triangle,
+        )
         .to_rgb8();
 
     // Written beside and renamed, so an interrupted write never leaves a file
@@ -265,7 +274,10 @@ pub fn write_linear_jxl_dng(path: &Path, image: &DynamicImage, distance: f32) ->
         // read JPEG XL back. See the note at the top.
         raw_ifd.add_tag(TiffCommonTag::SampleFormat, [1_u16, 1, 1]);
         raw_ifd.add_tag(TiffCommonTag::SamplesPerPixel, 3_u16);
-        raw_ifd.add_tag(TiffCommonTag::PhotometricInt, PhotometricInterpretation::LinearRaw);
+        raw_ifd.add_tag(
+            TiffCommonTag::PhotometricInt,
+            PhotometricInterpretation::LinearRaw,
+        );
         raw_ifd.add_tag(TiffCommonTag::Compression, CompressionMethod::JPEGXL);
         raw_ifd.add_tag(TiffCommonTag::TileWidth, TILE_WIDTH);
         raw_ifd.add_tag(TiffCommonTag::TileLength, TILE_HEIGHT);
@@ -276,7 +288,10 @@ pub fn write_linear_jxl_dng(path: &Path, image: &DynamicImage, distance: f32) ->
         // merge opens far too bright; see the note at the top of the module.
         // Black and white levels are in linearised units, which is why they
         // stay 0 and full scale.
-        raw_ifd.add_tag(DngTag::LinearizationTable, srgb_linearization_table().as_slice());
+        raw_ifd.add_tag(
+            DngTag::LinearizationTable,
+            srgb_linearization_table().as_slice(),
+        );
         raw_ifd.add_tag(DngTag::WhiteLevel, [u16::MAX, u16::MAX, u16::MAX]);
         raw_ifd.add_tag(DngTag::BlackLevel, [0_u16, 0, 0]);
 
@@ -291,7 +306,10 @@ pub fn write_linear_jxl_dng(path: &Path, image: &DynamicImage, distance: f32) ->
         root.add_tag(TiffCommonTag::BitsPerSample, [8_u16, 8, 8]);
         root.add_tag(TiffCommonTag::SampleFormat, [1_u16, 1, 1]);
         root.add_tag(TiffCommonTag::SamplesPerPixel, 3_u16);
-        root.add_tag(TiffCommonTag::PhotometricInt, PhotometricInterpretation::RGB);
+        root.add_tag(
+            TiffCommonTag::PhotometricInt,
+            PhotometricInterpretation::RGB,
+        );
         root.add_tag(TiffCommonTag::Compression, CompressionMethod::None);
         root.add_tag(TiffCommonTag::StripOffsets, thumb_offset);
         root.add_tag(TiffCommonTag::StripByteCounts, thumbnail.len() as u32);
@@ -307,13 +325,19 @@ pub fn write_linear_jxl_dng(path: &Path, image: &DynamicImage, distance: f32) ->
         // The pixels are already white balanced and already in sRGB primaries,
         // so the neutral is one and the matrix is the standard one. Anything
         // else would be describing a camera this file did not come from.
-        root.add_tag(DngTag::AsShotNeutral, [
-            rawler::formats::tiff::Rational::new(1, 1),
-            rawler::formats::tiff::Rational::new(1, 1),
-            rawler::formats::tiff::Rational::new(1, 1),
-        ]);
+        root.add_tag(
+            DngTag::AsShotNeutral,
+            [
+                rawler::formats::tiff::Rational::new(1, 1),
+                rawler::formats::tiff::Rational::new(1, 1),
+                rawler::formats::tiff::Rational::new(1, 1),
+            ],
+        );
         root.add_tag(DngTag::CalibrationIlluminant1, 21_u16); // D65, matching the matrix below
-        root.add_tag(DngTag::ColorMatrix1, srational_10000(&XYZ_D65_TO_SRGB).as_slice());
+        root.add_tag(
+            DngTag::ColorMatrix1,
+            srational_10000(&XYZ_D65_TO_SRGB).as_slice(),
+        );
         root.add_tag(TiffCommonTag::SubIFDs, raw_offset);
 
         tiff.build(root)
@@ -375,7 +399,6 @@ mod tests {
             bytes.len()
         );
     }
-
 
     /// The one that matters: a file we wrote, opened by the loader that will
     /// have to open it.
@@ -485,9 +508,7 @@ mod tests {
         for (index, (stored, expected_linear)) in bands.iter().enumerate() {
             let pixel = out.get_pixel(w / 2, index as u32 * 64 + 32);
             let got = pixel[1] as f64;
-            eprintln!(
-                "stored {stored:.4} -> got {got:.4}, linear should be {expected_linear:.4}"
-            );
+            eprintln!("stored {stored:.4} -> got {got:.4}, linear should be {expected_linear:.4}");
             // Wide enough for the codec and the near-identity colour matrix,
             // nowhere near wide enough to let the uncurved value through: the
             // two differ by more than a factor of two everywhere but the ends.

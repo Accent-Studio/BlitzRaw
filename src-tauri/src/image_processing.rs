@@ -1175,19 +1175,19 @@ pub fn inverse_transform_point(
         let lk2 = params.lens_dist_k2 as f64;
         let lk3 = params.lens_dist_k3 as f64;
         // ============ BLITZRAW: 100% means the profile, not two and a half of it ============
-    // This was `* 2.5`. A lens profile is a measurement: at 100% the correction
-    // is supposed to be exactly what was measured, and there is no number to
-    // multiply it by. The gain looks copied from the manual Distortion slider a
-    // few lines down, where a 2.5 gain on a -100..100 control is reasonable.
-    //
-    // What it looked like: every profile was applied at 250%. The corner did not
-    // move, because every model in this database is normalised so that the
-    // corner maps to itself, but everything between the centre and the corner
-    // was pushed two and a half times too far. So straight lines near the edge
-    // bowed the wrong way and the picture read as over-corrected rather than
-    // corrected. Upstream code, not ours.
-    let lens_dist_amt = params.lens_distortion_amount as f64;
-    // ========== BLITZRAW END: 100% means the profile, not two and a half of it ==========
+        // This was `* 2.5`. A lens profile is a measurement: at 100% the correction
+        // is supposed to be exactly what was measured, and there is no number to
+        // multiply it by. The gain looks copied from the manual Distortion slider a
+        // few lines down, where a 2.5 gain on a -100..100 control is reasonable.
+        //
+        // What it looked like: every profile was applied at 250%. The corner did not
+        // move, because every model in this database is normalised so that the
+        // corner maps to itself, but everything between the centre and the corner
+        // was pushed two and a half times too far. So straight lines near the edge
+        // bowed the wrong way and the picture read as over-corrected rather than
+        // corrected. Upstream code, not ours.
+        let lens_dist_amt = params.lens_distortion_amount as f64;
+        // ========== BLITZRAW END: 100% means the profile, not two and a half of it ==========
 
         let has_lens_correction = params.lens_distortion_enabled
             && (lk1.abs() > 1e-6 || lk2.abs() > 1e-6 || lk3.abs() > 1e-6);

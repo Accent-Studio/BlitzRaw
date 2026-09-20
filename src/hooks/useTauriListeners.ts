@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
+import { Invokes } from '../components/ui/AppProperties';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -75,12 +76,34 @@ export function useTauriListeners({
         if (isEffectActive) useEditorStore.getState().setEditor({ uncroppedAdjustedPreviewUrl: event.payload });
       }),
       listen('analytics-update', (event: any) => {
-        if (isEffectActive && event.payload.path === useEditorStore.getState().selectedImage?.path) {
-          const update: { histogram?: any; waveform?: any } = {};
-          if (event.payload.histogram != null) update.histogram = event.payload.histogram;
-          if (event.payload.waveform != null) update.waveform = event.payload.waveform;
-          useEditorStore.getState().setEditor(update);
+        if (!isEffectActive) return;
+        const editor = useEditorStore.getState();
+        if (event.payload.path !== editor.selectedImage?.path) return;
+
+        const update: { histogram?: any; waveform?: any; editorScopes?: any; scopesPath?: string } = {};
+        if (event.payload.histogram != null) update.histogram = event.payload.histogram;
+        if (event.payload.waveform != null) update.waveform = event.payload.waveform;
+
+        // BLITZRAW: kept whole and separately, so unhovering can put the
+        // accurate pair back rather than leaving the photo being worked on
+        // showing scopes taken off a preview. See useScopeSource.
+        const held = editor.editorScopes?.path === event.payload.path ? editor.editorScopes : null;
+        update.editorScopes = {
+          path: event.payload.path,
+          histogram: event.payload.histogram ?? held?.histogram ?? null,
+          waveform: event.payload.waveform ?? held?.waveform ?? null,
+        };
+
+        // And only put on screen when the screen is showing this photo. The
+        // pointer may be over a different frame, whose scopes are the ones
+        // being looked at.
+        const hovered = useLibraryStore.getState().hoveredPath;
+        if (hovered && hovered !== event.payload.path) {
+          useEditorStore.getState().setEditor({ editorScopes: update.editorScopes });
+          return;
         }
+        update.scopesPath = event.payload.path;
+        useEditorStore.getState().setEditor(update);
       }),
       listen('open-with-file', (event: any) => {
         if (isEffectActive) useProcessStore.getState().setProcess({ initialFileToOpen: event.payload as string });
@@ -94,15 +117,28 @@ export function useTauriListeners({
             .getState()
             .setProcess({ thumbnailProgress: { current: event.payload.current, total: event.payload.total } });
       }),
+      listen('preview-build-progress', (event: any) => {
+        if (isEffectActive)
+          useProcessStore
+            .getState()
+            .setProcess({ previewProgress: { current: event.payload.current, total: event.payload.total } });
+      }),
       listen('thumbnail-generation-complete', () => {
         if (isEffectActive) useProcessStore.getState().setProcess({ thumbnailProgress: { current: 0, total: 0 } });
       }),
       listen('thumbnail-generated', (event: any) => {
         if (!isEffectActive) return;
-        const { path, thumbnailPath, rating, is_edited, data } = event.payload;
+        const { path, thumbnailPath, version, rating, is_edited, data } = event.payload;
 
         if (thumbnailPath) {
-          thumbnailBuffer.current[path] = convertFileSrc(thumbnailPath.replace(/\\/g, '/'));
+          // BLITZRAW: a thumbnail keeps one file name for the life of the photo,
+          // so that moving a shoot does not orphan it. That also means the URL
+          // never changes, and a webview does not re-fetch a URL it already has:
+          // an edit rewrote the file and the grid kept showing the old picture.
+          // The version is the file's modification time, so a rewritten
+          // thumbnail gets a new URL and an unchanged one stays cached.
+          const url = convertFileSrc(thumbnailPath.replace(/\\/g, '/'));
+          thumbnailBuffer.current[path] = version ? `${url}?v=${version}` : url;
           refs.current.markGenerated(path);
         } else if (data) {
           thumbnailBuffer.current[path] = data;
@@ -155,7 +191,18 @@ export function useTauriListeners({
         if (isEffectActive) useProcessStore.getState().setExportState({ progress: event.payload });
       }),
       listen('export-complete', () => {
-        if (isEffectActive) useProcessStore.getState().setExportState({ status: Status.Success });
+        if (!isEffectActive) return;
+        // BLITZRAW: what left the building is worth being able to get back to,
+        // so each photo's state is pinned into its history and never culled.
+        // Here rather than where the export starts, so a cancelled one pins
+        // nothing.
+        const { paths } = useProcessStore.getState().exportState;
+        if (paths?.length) {
+          invoke(Invokes.PinExportedState, { paths, label: 'Exported' }).catch((err) =>
+            console.error('Could not pin the exported state:', err),
+          );
+        }
+        useProcessStore.getState().setExportState({ status: Status.Success });
       }),
       listen('export-error', (event: any) => {
         if (isEffectActive)
@@ -275,8 +322,20 @@ export function useTauriListeners({
           }));
         }
       }),
+      // The floating window saying which scopes it is showing, written the way
+      // the backend reads them so the gain travels with the name. An empty list
+      // means it is showing none, which is not the same as showing the default
+      // one: the backend reads an empty request as "all of them". See
+      // FloatingPanels.tsx.
+      listen('detached-scopes-changed', (event: any) => {
+        if (!isEffectActive) return;
+        const channels = event.payload?.channels;
+        useUIStore.getState().setUI({
+          detachedScopeChannels: Array.isArray(channels) && channels.length > 0 ? channels : null,
+        });
+      }),
       listen('hdr-progress', (event: any) => {
-        if (isEffectActive) {
+        if (isEffectActive && !useUIStore.getState().isBulkHdrRunning) {
           useUIStore.getState().setUI((state) => ({
             hdrModalState: {
               ...state.hdrModalState,
@@ -289,7 +348,7 @@ export function useTauriListeners({
         }
       }),
       listen('hdr-complete', (event: any) => {
-        if (isEffectActive) {
+        if (isEffectActive && !useUIStore.getState().isBulkHdrRunning) {
           useUIStore.getState().setUI((state) => ({
             hdrModalState: {
               ...state.hdrModalState,
@@ -302,7 +361,7 @@ export function useTauriListeners({
         }
       }),
       listen('hdr-error', (event: any) => {
-        if (isEffectActive) {
+        if (isEffectActive && !useUIStore.getState().isBulkHdrRunning) {
           useUIStore.getState().setUI((state) => ({
             hdrModalState: {
               ...state.hdrModalState,

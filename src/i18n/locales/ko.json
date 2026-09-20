@@ -61,6 +61,8 @@
       "tint": "틴트",
       "toggleSliders": "슬라이더 전환",
       "vibrance": "생동감",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "화이트 밸런스 피커",
       "wbPickerWgpuDisabled": "WB 피커: 설정에서 WGPU를 비활성화하세요.",
       "whiteBalance": "화이트 밸런스"

@@ -1,50 +1,66 @@
 import { useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
+  Album as AlbumIcon,
   Aperture,
+  Briefcase,
+  Camera,
+  Car,
   Check,
+  ChevronDown,
+  ChevronUp,
+  ChevronsDownUp,
+  ChevronsUpDown,
   ClipboardPaste,
+  Combine,
   Copy,
   CopyPlus,
   Edit,
+  FileDown,
   FileEdit,
   FileInput,
+  Film,
   Folder,
   FolderInput,
   FolderPlus,
+  Gauge,
+  Grip,
+  Group,
+  Heart,
+  Home,
+  ImageDown,
+  ImageOff,
   Images,
+  Layers,
   LayoutTemplate,
+  Map,
+  Mountain,
+  Palette,
+  Pin,
+  PinOff,
+  Plane,
   Redo,
   RefreshCw,
   RotateCcw,
-  Star,
   SquaresUnite,
-  Palette,
+  Star,
+  Sun,
   Tag,
   Trash2,
   Undo,
-  X,
-  Pin,
-  PinOff,
-  Users,
-  Gauge,
-  Grip,
-  Film,
-  Home,
-  Plane,
-  Mountain,
-  Sun,
-  Camera,
-  Map,
-  Heart,
-  Car,
-  Briefcase,
+  Ungroup,
   User,
-  Album as AlbumIcon,
+  Users,
+  X,
+  Zap,
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useTranslation } from 'react-i18next';
 import { useContextMenu } from '../context/ContextMenuContext';
+import { useDngConversion } from './useDngConversion';
+import { useBulkHdr } from './useBulkHdr';
+import { stackIdsForSelection, stacksForSelection, BOTH, EDIT_RULE } from '../utils/imageStacking';
+import { selectionFor } from '../utils/selection';
 import { useEditorStore } from '../store/useEditorStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useProcessStore } from '../store/useProcessStore';
@@ -56,6 +72,10 @@ import TaggingSubMenu from '../context/TaggingSubMenu';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { useAppUndo } from './useAppUndo';
+import { actionForChange } from '../utils/currentAction';
+import { recordAppAction, recordingFinished, recordingStarted } from '../utils/appHistory';
+import { redoTarget, undoTarget } from '../utils/appHistory';
 
 export interface UseAppContextMenusProps {
   handleImageSelect: (path: string) => void;
@@ -67,15 +87,23 @@ export interface UseAppContextMenusProps {
   refreshImageList: () => Promise<void>;
   executeDelete: (paths: string[], options: any) => Promise<void>;
   handleTogglePinFolder: (path: string) => Promise<void>;
+  /** BLITZRAW: so Undo here means the same as Ctrl+Z. See useAppUndo. */
+  prevAdjustmentsRef: React.RefObject<any>;
 }
 
 export function useAppContextMenus(props: UseAppContextMenusProps) {
   const { t } = useTranslation();
+  // BLITZRAW: one undo, wherever it is pressed from. This menu used to walk the
+  // open photo's own history while Ctrl+Z walked the list of what was done, so
+  // the same word meant two different things.
+  const { walkAction } = useAppUndo(props.handleBackToLibrary, props.prevAdjustmentsRef);
   const { showContextMenu } = useContextMenu();
+  const { convertPaths: convertPathsToDng } = useDngConversion(props.handleLibraryRefresh);
+  const { mergeStacks } = useBulkHdr(props.handleLibraryRefresh);
 
   const { handleAutoAdjustments, handleResetAdjustments, handleCopyAdjustments, handlePasteAdjustments } =
     useEditorActions();
-  const { handleRate, handleSetColorLabel, handleTagsChanged } = useLibraryActions();
+  const { handleRate, handleAdjustRating, handleSetColorLabel, handleTagsChanged } = useLibraryActions();
 
   const albumIcons = useMemo(
     () => [
@@ -161,15 +189,18 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       event.preventDefault();
       event.stopPropagation();
 
-      const { selectedImage, history, historyIndex, undo, redo, resetHistory, copiedAdjustments, setEditor } =
+      const { selectedImage, copiedAdjustments, setEditor } =
         useEditorStore.getState();
       const { appSettings } = useSettingsStore.getState();
       const { setPanel, setUI } = useUIStore.getState();
 
       if (!selectedImage) return;
 
-      const canUndo = historyIndex > 0;
-      const canRedo = historyIndex < history.length - 1;
+      // BLITZRAW: what the list of what I did offers, not what this one photo
+      // offers. The menu used to be greyed out on a photo with no history of its
+      // own even when there was plenty to undo.
+      const canUndo = undoTarget() !== null;
+      const canRedo = redoTarget() !== null;
       const commonTags = getCommonTags([selectedImage.path]);
 
       const options: Array<Option> = [
@@ -179,8 +210,18 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           onClick: () => setPanel(Panel.Export),
         },
         { type: OPTION_SEPARATOR },
-        { label: t('contextMenus.editor.undo'), icon: Undo, onClick: undo, disabled: !canUndo },
-        { label: t('contextMenus.editor.redo'), icon: Redo, onClick: redo, disabled: !canRedo },
+        {
+          label: t('contextMenus.editor.undo'),
+          icon: Undo,
+          onClick: () => void walkAction(false),
+          disabled: !canUndo,
+        },
+        {
+          label: t('contextMenus.editor.redo'),
+          icon: Redo,
+          onClick: () => void walkAction(true),
+          disabled: !canRedo,
+        },
         { type: OPTION_SEPARATOR },
         {
           label: t('contextMenus.editor.copyAdjustments'),
@@ -245,13 +286,28 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         {
           label: t('contextMenus.editor.rating'),
           icon: Star,
-          submenu: [0, 1, 2, 3, 4, 5].map((rating: number) => ({
-            label:
-              rating === 0
-                ? t('contextMenus.editor.noRating')
-                : t('contextMenus.editor.ratingLabel', { count: rating }),
-            onClick: () => handleRate(rating),
-          })),
+          submenu: [
+            ...[0, 1, 2, 3, 4, 5].map((rating: number) => ({
+              label:
+                rating === 0
+                  ? t('contextMenus.editor.noRating')
+                  : t('contextMenus.editor.ratingLabel', { count: rating }),
+              onClick: () => handleRate(rating),
+            })),
+            // BLITZRAW: relative, so a mixed selection keeps its order instead
+            // of being flattened to one number. See handleAdjustRating.
+            { type: OPTION_SEPARATOR },
+            {
+              label: t('contextMenus.editor.increaseRating'),
+              icon: ChevronUp,
+              onClick: () => handleAdjustRating(1),
+            },
+            {
+              label: t('contextMenus.editor.decreaseRating'),
+              icon: ChevronDown,
+              onClick: () => handleAdjustRating(-1),
+            },
+          ],
         },
         {
           label: t('contextMenus.editor.colorLabel'),
@@ -293,12 +349,12 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
               onClick: () => {
                 const originalAspectRatio =
                   selectedImage.width && selectedImage.height ? selectedImage.width / selectedImage.height : null;
-                resetHistory({
-                  ...INITIAL_ADJUSTMENTS,
-                  aspectRatio: originalAspectRatio,
-                  aiPatches: [],
-                });
-                setEditor({ adjustments: { ...INITIAL_ADJUSTMENTS, aspectRatio: originalAspectRatio, aiPatches: [] } });
+                // A step, not a fresh start. Resetting a photo is a thing you
+                // did to it, and being able to walk back out of it is the
+                // point of having a history at all.
+                const reset = { ...INITIAL_ADJUSTMENTS, aspectRatio: originalAspectRatio, aiPatches: [] };
+                useEditorStore.getState().pushHistory(reset, 'Reset');
+                setEditor({ adjustments: reset });
               },
             },
           ],
@@ -312,6 +368,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       handlePasteAdjustments,
       handleAutoAdjustments,
       handleRate,
+      handleAdjustRating,
       handleSetColorLabel,
       handleTagsChanged,
       showContextMenu,
@@ -325,8 +382,15 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       event.stopPropagation();
 
       const { selectedImage, copiedAdjustments, setEditor } = useEditorStore.getState();
-      const { multiSelectedPaths, imageList, libraryActivePath, albumTree, activeAlbumId, setLibrary } =
-        useLibraryStore.getState();
+      const {
+        multiSelectedPaths,
+        imageList,
+        libraryActivePath,
+        albumTree,
+        activeAlbumId,
+        expandedStacks,
+        setLibrary,
+      } = useLibraryStore.getState();
       const { appSettings } = useSettingsStore.getState();
       const { activeView, setUI, setPanel } = useUIStore.getState();
       const { setProcess } = useProcessStore.getState();
@@ -346,7 +410,27 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         finalSelection = multiSelectedPaths;
       }
 
+      // Three views of the same click, because a collapsed stack means
+      // different things to different verbs. See "BlitzRaw — Stack Selection".
+      //
+      //   edit     a merged result stays alone, a peer stack opens up
+      //   whole    every frame, whichever kind of stack it is
+      //   leader   one file per stack, whichever kind
+      //
+      // finalSelection itself is never rewritten: it is still what was clicked,
+      // and anything comparing against it keeps working.
+      const editSelection = selectionFor(EDIT_RULE, finalSelection);
+      const wholeSelection = selectionFor(BOTH('fullStack'), finalSelection);
+      const leaderSelection = selectionFor(BOTH('leaderOnly'), finalSelection);
+
       const commonTags = getCommonTags(finalSelection);
+      const selectedStacks = stacksForSelection(imageList, finalSelection);
+
+      // Stacking verbs act on the stack rather than on the photographs, so they
+      // count open stacks too and take every frame of the ones they touch.
+      const touchedStackIds = stackIdsForSelection(imageList, finalSelection);
+      const openStacks = touchedStackIds.filter((id) => (expandedStacks ?? []).includes(id));
+      const closedStacks = touchedStackIds.filter((id) => !(expandedStacks ?? []).includes(id));
 
       const selectionCount = finalSelection.length;
       const isSingleSelection = selectionCount === 1;
@@ -382,7 +466,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             label: t('contextMenus.thumbnail.confirmDeleteVc'),
             icon: Check,
             isDestructive: true,
-            onClick: () => props.executeDelete(finalSelection, { includeAssociated: false }),
+            onClick: () => props.executeDelete(wholeSelection, { includeAssociated: false }),
           },
         ];
       } else if (hasAssociatedFiles) {
@@ -392,13 +476,13 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             label: t('contextMenus.thumbnail.deleteSelected'),
             icon: Check,
             isDestructive: true,
-            onClick: () => props.executeDelete(finalSelection, { includeAssociated: false }),
+            onClick: () => props.executeDelete(wholeSelection, { includeAssociated: false }),
           },
           {
             label: t('contextMenus.thumbnail.deleteAssociated'),
             icon: Check,
             isDestructive: true,
-            onClick: () => props.executeDelete(finalSelection, { includeAssociated: true }),
+            onClick: () => props.executeDelete(wholeSelection, { includeAssociated: true }),
           },
         ];
       } else {
@@ -408,7 +492,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             label: t('contextMenus.thumbnail.confirmDelete'),
             icon: Check,
             isDestructive: true,
-            onClick: () => props.executeDelete(finalSelection, { includeAssociated: false }),
+            onClick: () => props.executeDelete(wholeSelection, { includeAssociated: false }),
           },
         ];
       }
@@ -424,13 +508,22 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       const conversionLabel = t('contextMenus.thumbnail.convertNegative', { count: selectionCount });
       const denoiseLabel = t('contextMenus.thumbnail.denoise', { count: selectionCount });
       const mergeLabel = t('contextMenus.editor.mergeHdr');
+      const openStacksLabel = t('contextMenus.thumbnail.openStacks', { count: closedStacks.length });
+      const closeStacksLabel = t('contextMenus.thumbnail.closeStacks', { count: openStacks.length });
+      const stackLabel = t('contextMenus.thumbnail.stackImages', { count: wholeSelection.length });
+      const unstackLabel = t('contextMenus.thumbnail.unstack', { count: touchedStackIds.length });
 
-      const handleCreateVirtualCopy = async (sourcePath: string) => {
+      // Both copy actions used to take finalSelection[0] and act on one file.
+      // A peer stack copies whole, so they loop now; a merged result still
+      // copies alone, which the edit rule already resolves to a single path.
+      const handleCreateVirtualCopy = async (sourcePaths: Array<string>) => {
         try {
-          await invoke(Invokes.CreateVirtualCopy, {
-            sourceVirtualPath: sourcePath,
-            targetAlbumId: activeAlbumId || null,
-          });
+          for (const sourcePath of sourcePaths) {
+            await invoke(Invokes.CreateVirtualCopy, {
+              sourceVirtualPath: sourcePath,
+              targetAlbumId: activeAlbumId || null,
+            });
+          }
 
           if (activeAlbumId) {
             const sortedTree = await invoke<AlbumItem[]>(Invokes.GetAlbums);
@@ -443,17 +536,37 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       };
 
       const handleApplyAutoAdjustmentsToSelection = () => {
-        if (finalSelection.length === 0) return;
-        finalSelection.forEach((p) => globalImageCache.delete(p));
+        if (editSelection.length === 0) return;
+        editSelection.forEach((p) => globalImageCache.delete(p));
 
-        invoke(Invokes.ApplyAutoAdjustmentsToPaths, { paths: finalSelection })
-          .then(async () => {
+        // BLITZRAW: one deliberate event, so it opens an action of its own that
+        // nothing joins. The hard rule: anything that writes a step into a photo
+        // writes an entry here.
+        const autoAction = actionForChange(['auto'], true);
+        recordingStarted();
+        invoke(Invokes.ApplyAutoAdjustmentsToPaths, {
+          paths: editSelection,
+          skipHistoryFor: selectedImage?.path ?? null,
+        })
+          .then(async (photos: any) => {
+            recordAppAction({
+              id: autoAction,
+              kind: 'adjustments',
+              label: 'Auto adjustments',
+              photos: photos ?? [],
+              selection: editSelection,
+              openPath: selectedImage?.path ?? null,
+              inEditor: !!selectedImage,
+            });
             if (selectedImage && finalSelection.includes(selectedImage.path)) {
               const metadata: any = await invoke(Invokes.LoadMetadata, { path: selectedImage.path });
               if (metadata.adjustments && !metadata.adjustments.is_null) {
                 const normalized = normalizeLoadedAdjustments(metadata.adjustments);
                 setEditor({ adjustments: normalized });
-                useEditorStore.getState().resetHistory(normalized);
+                // Something was applied across the selection and this photo is
+                // one of them. A step, so trying a preset and disliking it
+                // leaves the way back intact.
+                useEditorStore.getState().pushHistory(normalized, 'Auto adjustments');
               }
             }
             if (libraryActivePath && finalSelection.includes(libraryActivePath)) {
@@ -467,7 +580,8 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           .catch((err) => {
             console.error('Failed to apply auto adjustments to paths:', err);
             toast.error(t('contextMenus.toasts.failedApplyAuto', { err }));
-          });
+          })
+          .finally(recordingFinished);
       };
 
       const onExportClick = () => {
@@ -490,7 +604,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         const removeImages = (nodes: AlbumItem[]): boolean => {
           for (const n of nodes) {
             if (n.id === activeAlbumId && n.type === 'album') {
-              (n as Album).images = (n as Album).images.filter((p) => !finalSelection.includes(p));
+              (n as Album).images = (n as Album).images.filter((p) => !leaderSelection.includes(p));
               return true;
             } else if (n.type === 'group') {
               if (removeImages(n.children)) return true;
@@ -547,7 +661,183 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           disabled: copiedAdjustments === null,
           icon: ClipboardPaste,
           label: pasteLabel,
-          onClick: () => handlePasteAdjustments(finalSelection),
+          onClick: () => handlePasteAdjustments(editSelection),
+        },
+        // BLITZRAW: three submenus where there was one. Productivity had grown
+        // to twelve entries covering three unrelated jobs, so stacking and
+        // merging moved out to their own. See "BlitzRaw — Stack Selection" for
+        // which selection each verb reads.
+        //
+        // Opening, closing, stacking and unstacking act on the stack itself
+        // rather than on the photographs in it, so they count open stacks as
+        // well as closed ones and take every frame of the ones they touch.
+        {
+          label: t('contextMenus.thumbnail.stacksMenu'),
+          icon: Layers,
+          submenu: [
+            {
+              label: openStacksLabel,
+              icon: ChevronsUpDown,
+              disabled: closedStacks.length === 0,
+              onClick: () =>
+                setLibrary({ expandedStacks: [...(expandedStacks ?? []), ...closedStacks] }),
+            },
+            {
+              label: closeStacksLabel,
+              icon: ChevronsDownUp,
+              disabled: openStacks.length === 0,
+              onClick: () =>
+                setLibrary({
+                  expandedStacks: (expandedStacks ?? []).filter((id: string) => !openStacks.includes(id)),
+                }),
+            },
+            { type: OPTION_SEPARATOR },
+            {
+              label: stackLabel,
+              icon: Group,
+              // Two frames is the smallest thing worth stacking. set_stacks
+              // replaces any stack that already held one of these, so stacking
+              // across existing stacks merges them rather than conflicting.
+              disabled: wholeSelection.length < 2,
+              onClick: async () => {
+                try {
+                  await invoke('set_stacks', { stacks: [wholeSelection] });
+                  await props.refreshImageList();
+                  toast.success(t('notifications.stacked', { count: wholeSelection.length }));
+                } catch (err) {
+                  toast.error(`${err}`);
+                }
+              },
+            },
+            {
+              label: unstackLabel,
+              icon: Ungroup,
+              disabled: touchedStackIds.length === 0,
+              onClick: async () => {
+                try {
+                  const removed = await invoke<number>('clear_stacks', { paths: wholeSelection });
+                  await props.refreshImageList();
+                  toast.success(t('notifications.unstacked', { count: removed }));
+                } catch (err) {
+                  toast.error(`${err}`);
+                }
+              },
+            },
+            { type: OPTION_SEPARATOR },
+            {
+              label: t('contextMenus.thumbnail.autoStack', { count: selectionCount }),
+              icon: Layers,
+              // A bracket is at least three frames, so a smaller selection has
+              // nothing to find.
+              disabled: selectionCount < 3,
+              onClick: () => {
+                setUI({
+                  autoStackModalState: { isOpen: true, targetPaths: finalSelection, mode: 'brackets' },
+                });
+              },
+            },
+            {
+              label: t('contextMenus.thumbnail.autoStackBursts'),
+              icon: Zap,
+              // Two frames is a burst, unlike a bracket which needs three.
+              disabled: selectionCount < 2,
+              onClick: () => {
+                setUI({
+                  autoStackModalState: { isOpen: true, targetPaths: finalSelection, mode: 'bursts' },
+                });
+              },
+            },
+          ],
+        },
+        {
+          label: t('contextMenus.thumbnail.mergeMenu'),
+          icon: Combine,
+          submenu: [
+            {
+              label: t('contextMenus.thumbnail.mergeStackedHdr', { count: selectedStacks.length }),
+              icon: Combine,
+              // Selecting one collapsed frame is enough; its bracket comes with it.
+              disabled: selectedStacks.length === 0,
+              onClick: () => {
+                // A long unattended run that writes a file per stack is worth
+                // confirming once, with the actual counts, rather than starting
+                // the moment the menu is clicked.
+                const frames = selectedStacks.reduce((total, stack) => total + stack.paths.length, 0);
+                const { appSettings, handleSettingsChange } = useSettingsStore.getState();
+
+                // Alignment belongs on this dialog rather than in settings: it
+                // is a per-shoot decision, tripod or handheld, and the answer is
+                // remembered so a tripod shooter sets it once.
+                const setAlign = (checked: boolean) => {
+                  handleSettingsChange({ ...appSettings!, hdrAutoAlign: checked });
+                  setUI((state: any) => ({
+                    confirmModalState: {
+                      ...state.confirmModalState,
+                      checkbox: { ...state.confirmModalState.checkbox, checked },
+                    },
+                  }));
+                };
+
+                setUI({
+                  confirmModalState: {
+                    isOpen: true,
+                    title: t('modals.bulkHdr.title'),
+                    message: t('modals.bulkHdr.message', { stacks: selectedStacks.length, frames }),
+                    confirmText: t('modals.bulkHdr.confirm'),
+                    checkbox: {
+                      label: t('modals.bulkHdr.autoAlign'),
+                      checked: appSettings?.hdrAutoAlign ?? false,
+                      onChange: setAlign,
+                    },
+                    onConfirm: () => mergeStacks(selectedStacks),
+                  },
+                });
+              },
+            },
+            {
+              disabled: selectionCount < 2 || selectionCount > 9,
+              icon: Images,
+              label: mergeLabel,
+              onClick: () => {
+                setUI({
+                  hdrModalState: {
+                    error: null,
+                    finalImageBase64: null,
+                    isOpen: true,
+                    isProcessing: false,
+                    progressMessage: null,
+                    stitchingSourcePaths: editSelection,
+                  },
+                });
+              },
+            },
+            {
+              disabled: selectionCount < 2 || selectionCount > 30,
+              icon: SquaresUnite,
+              label: stitchLabel,
+              onClick: () => {
+                setUI({
+                  panoramaModalState: {
+                    error: null,
+                    finalImageBase64: null,
+                    isOpen: true,
+                    isProcessing: false,
+                    progressMessage: null,
+                    stitchingSourcePaths: editSelection,
+                  },
+                });
+              },
+            },
+            {
+              icon: LayoutTemplate,
+              label: collageLabel,
+              onClick: () => {
+                const imagesForCollage = imageList.filter((img) => editSelection.includes(img.path));
+                setUI({ collageModalState: { isOpen: true, sourceImages: imagesForCollage } });
+              },
+              disabled: selectionCount === 0 || selectionCount > 9,
+            },
+          ],
         },
         {
           label: t('contextMenus.editor.productivity'),
@@ -565,7 +855,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
                     isProcessing: false,
                     previewBase64: null,
                     error: null,
-                    targetPaths: finalSelection,
+                    targetPaths: editSelection,
                     progressMessage: null,
                     isRaw: selectedImage?.isRaw || false,
                   },
@@ -577,51 +867,57 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
               icon: Film,
               disabled: selectionCount === 0,
               onClick: () => {
-                setUI({ negativeModalState: { isOpen: true, targetPaths: finalSelection } });
+                setUI({ negativeModalState: { isOpen: true, targetPaths: editSelection } });
               },
             },
             {
-              disabled: selectionCount < 2 || selectionCount > 30,
-              icon: SquaresUnite,
-              label: stitchLabel,
+              label: t('contextMenus.thumbnail.convertToDng', { count: selectionCount }),
+              icon: FileDown,
+              disabled: selectionCount === 0,
+              onClick: () => convertPathsToDng(editSelection),
+            },
+            // BLITZRAW: previews on disk, so opening a photo large does not
+            // wait on a decode it has already paid for once. Same rule as the
+            // rest of this submenu: a merged stack keeps its result, a peer
+            // stack opens up, since a bracket's frames are working files and a
+            // burst's frames are photographs.
+            {
+              label: t('contextMenus.thumbnail.buildPreviews', { count: selectionCount }),
+              icon: ImageDown,
+              disabled: selectionCount === 0,
               onClick: () => {
-                setUI({
-                  panoramaModalState: {
-                    error: null,
-                    finalImageBase64: null,
-                    isOpen: true,
-                    isProcessing: false,
-                    progressMessage: null,
-                    stitchingSourcePaths: finalSelection,
-                  },
-                });
+                invoke(Invokes.BuildPreviewsForPaths, { paths: editSelection })
+                  .then((result: any) => {
+                    if (result.failed > 0) {
+                      toast.warning(
+                        t('notifications.previewsFailed', {
+                          failed: result.failed,
+                          reason: result.first_error ?? '',
+                        }),
+                      );
+                      return;
+                    }
+                    toast.success(
+                      result.skipped > 0
+                        ? t('notifications.previewsBuiltWithSkips', {
+                            built: result.built,
+                            skipped: result.skipped,
+                          })
+                        : t('notifications.previewsBuilt', { built: result.built }),
+                    );
+                  })
+                  .catch((err) => toast.error(`${err}`));
               },
             },
             {
-              disabled: selectionCount < 2 || selectionCount > 9,
-              icon: Images,
-              label: mergeLabel,
+              label: t('contextMenus.thumbnail.discardPreviews'),
+              icon: ImageOff,
+              disabled: selectionCount === 0,
               onClick: () => {
-                setUI({
-                  hdrModalState: {
-                    error: null,
-                    finalImageBase64: null,
-                    isOpen: true,
-                    isProcessing: false,
-                    progressMessage: null,
-                    stitchingSourcePaths: finalSelection,
-                  },
-                });
+                invoke(Invokes.DiscardPreviewsForPaths, { paths: editSelection })
+                  .then((count: any) => toast.success(t('notifications.previewsDiscarded', { count })))
+                  .catch((err) => toast.error(`${err}`));
               },
-            },
-            {
-              icon: LayoutTemplate,
-              label: collageLabel,
-              onClick: () => {
-                const imagesForCollage = imageList.filter((img) => finalSelection.includes(img.path));
-                setUI({ collageModalState: { isOpen: true, sourceImages: imagesForCollage } });
-              },
-              disabled: selectionCount === 0 || selectionCount > 9,
             },
             {
               label: cullLabel,
@@ -633,7 +929,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
                     progress: null,
                     suggestions: null,
                     error: null,
-                    pathsToCull: finalSelection,
+                    pathsToCull: editSelection,
                   },
                 }),
               disabled: selectionCount < 2,
@@ -645,7 +941,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           label: copyLabel,
           icon: Copy,
           onClick: () => {
-            setProcess({ copiedFilePaths: finalSelection, isCopied: true });
+            setProcess({ copiedFilePaths: editSelection, isCopied: true });
           },
         },
         {
@@ -658,10 +954,12 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
               icon: Copy,
               onClick: async () => {
                 try {
-                  await invoke(Invokes.DuplicateFile, {
-                    path: finalSelection[0],
-                    targetAlbumId: activeAlbumId || null,
-                  });
+                  for (const path of editSelection) {
+                    await invoke(Invokes.DuplicateFile, {
+                      path,
+                      targetAlbumId: activeAlbumId || null,
+                    });
+                  }
                   if (activeAlbumId) {
                     const sortedTree = await invoke<AlbumItem[]>(Invokes.GetAlbums);
                     setLibrary({ albumTree: sortedTree });
@@ -676,7 +974,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             {
               label: t('contextMenus.thumbnail.virtualCopy'),
               icon: CopyPlus,
-              onClick: () => handleCreateVirtualCopy(finalSelection[0]),
+              onClick: () => handleCreateVirtualCopy(editSelection),
             },
           ],
         },
@@ -685,13 +983,28 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         {
           icon: Star,
           label: t('contextMenus.editor.rating'),
-          submenu: [0, 1, 2, 3, 4, 5].map((rating: number) => ({
-            label:
-              rating === 0
-                ? t('contextMenus.editor.noRating')
-                : t('contextMenus.editor.ratingLabel', { count: rating }),
-            onClick: () => handleRate(rating, finalSelection),
-          })),
+          submenu: [
+            ...[0, 1, 2, 3, 4, 5].map((rating: number) => ({
+              label:
+                rating === 0
+                  ? t('contextMenus.editor.noRating')
+                  : t('contextMenus.editor.ratingLabel', { count: rating }),
+              onClick: () => handleRate(rating, finalSelection),
+            })),
+            // BLITZRAW: relative, so promoting a mixed selection moves every
+            // photo up from where it was rather than levelling them.
+            { type: OPTION_SEPARATOR },
+            {
+              label: t('contextMenus.editor.increaseRating'),
+              icon: ChevronUp,
+              onClick: () => handleAdjustRating(1, finalSelection),
+            },
+            {
+              label: t('contextMenus.editor.decreaseRating'),
+              icon: ChevronDown,
+              onClick: () => handleAdjustRating(-1, finalSelection),
+            },
+          ],
         },
         {
           label: t('contextMenus.editor.colorLabel'),
@@ -726,7 +1039,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           icon: FolderPlus,
           submenu:
             albumTree.length > 0
-              ? buildAddToAlbumMenu(albumTree, finalSelection)
+              ? buildAddToAlbumMenu(albumTree, leaderSelection)
               : [{ label: t('contextMenus.thumbnail.noAlbums'), disabled: true }],
         },
         ...(activeAlbumId
@@ -759,7 +1072,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
               label: t('contextMenus.editor.confirmReset'),
               icon: Check,
               isDestructive: true,
-              onClick: () => handleResetAdjustments(finalSelection),
+              onClick: () => handleResetAdjustments(editSelection),
             },
           ],
         },
@@ -778,6 +1091,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       handleCopyAdjustments,
       handlePasteAdjustments,
       handleRate,
+      handleAdjustRating,
       handleSetColorLabel,
       handleTagsChanged,
       handleResetAdjustments,

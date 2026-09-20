@@ -9,6 +9,8 @@ import Switch from '../../ui/Switch';
 import Button from '../../ui/Button';
 import Dropdown from '../../ui/Dropdown';
 import Slider from '../../ui/Slider';
+import { BOTH } from '../../../utils/imageStacking';
+import { selectionFor } from '../../../utils/selection';
 import ImagePicker from '../../ui/ImagePicker';
 import {
   ExportPreset,
@@ -285,13 +287,17 @@ export default function ExportPanel({
   const isLibraryContext = !!onClose;
 
   const pathsToExport = useMemo(() => {
-    return isLibraryContext
+    const requested = isLibraryContext
       ? multiSelectedPaths
       : multiSelectedPaths.length > 0
         ? multiSelectedPaths
         : selectedImage
           ? [selectedImage.path]
           : [];
+    // One file per stack, of either kind. Exporting a bracket means exporting
+    // the frame you kept, not the three exposures behind it, and the same goes
+    // for a burst: the stack exists because you already chose.
+    return selectionFor(BOTH('leaderOnly'), requested);
   }, [isLibraryContext, multiSelectedPaths, selectedImage?.path]);
 
   const numImages = pathsToExport.length;
@@ -535,7 +541,14 @@ export default function ExportPanel({
           if (dir) saveLastUsedPreset(dir);
         }
 
-        setExportState({ status: Status.Exporting, progress: { current: 0, total: numImages }, errorMessage: '' });
+        setExportState({
+          status: Status.Exporting,
+          progress: { current: 0, total: numImages },
+          errorMessage: '',
+          // BLITZRAW: remembered so the state each of these goes out in can be
+          // pinned into its history once the export has actually finished.
+          paths: pathsToExport,
+        });
         await invoke(Invokes.ExportImages, {
           paths: pathsToExport,
           outputFolderOrFile: outputFolderOrFile,

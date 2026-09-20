@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ADJUSTMENT_GROUPS, COPYABLE_ADJUSTMENT_KEYS, CopyPasteSettings, PasteMode } from '../../utils/adjustments';
+import { COPYABLE_ADJUSTMENT_KEYS, CopyPasteSettings, PasteMode } from '../../utils/adjustments';
+import IncludedAdjustments from '../ui/IncludedAdjustments';
 import Button from '../ui/Button';
 import Switch from '../ui/Switch';
 import Text from '../ui/Text';
@@ -158,24 +159,8 @@ export default function CopyPasteSettingsModal({ isOpen, onClose, onSave, settin
     };
   }, [isOpen, handleKeyDown]);
 
-  const handleSelectAll = () => {
-    setLocalSettings((prev) => ({ ...prev, includedAdjustments: [...COPYABLE_ADJUSTMENT_KEYS] }));
-  };
 
-  const handleSelectNone = () => {
-    setLocalSettings((prev) => ({ ...prev, includedAdjustments: [] }));
-  };
 
-  const handleGroupToggle = (keys: string[], checked: boolean) => {
-    setLocalSettings((prev) => {
-      const newSet = new Set(prev.includedAdjustments);
-      keys.forEach((key) => {
-        if (checked) newSet.add(key);
-        else newSet.delete(key);
-      });
-      return { ...prev, includedAdjustments: Array.from(newSet) };
-    });
-  };
 
   if (!isMounted) return null;
 
@@ -227,51 +212,11 @@ export default function CopyPasteSettingsModal({ isOpen, onClose, onSave, settin
             </Text>
           </div>
 
-          <div>
-            <div className="flex justify-between items-center mb-2">
-              <Text variant={TextVariants.heading}>{t('modals.copyPaste.includedAdjustments')}</Text>
-              <div className="flex gap-2">
-                <Button
-                  className="px-4 py-2 rounded-md text-text-secondary hover:bg-surface transition-colors"
-                  size="sm"
-                  onClick={handleSelectAll}
-                >
-                  {t('modals.copyPaste.selectAll')}
-                </Button>
-                <Button
-                  className="px-4 py-2 rounded-md text-text-secondary hover:bg-surface transition-colors"
-                  size="sm"
-                  onClick={handleSelectNone}
-                >
-                  {t('modals.copyPaste.selectNone')}
-                </Button>
-              </div>
-            </div>
-            <div className="bg-bg-primary p-4 rounded-md max-h-64 overflow-y-auto">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-6">
-                {Object.entries(ADJUSTMENT_GROUPS).map(([section, groups]) => (
-                  <div key={section}>
-                    <Text variant={TextVariants.heading} className="mb-2">
-                      {t(`editor.adjustments.sections.${section}`, { defaultValue: capitalize(section) })}
-                    </Text>
-                    {groups.map((group) => {
-                      const isFullyChecked = group.keys.every((key) => localSettings.includedAdjustments.includes(key));
-
-                      return (
-                        <div key={group.label} className="mb-1.5 last:mb-0">
-                          <Switch
-                            label={t(group.label)}
-                            checked={isFullyChecked}
-                            onChange={(checked) => handleGroupToggle(group.keys, checked)}
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+          <IncludedAdjustments
+            title={t('modals.copyPaste.includedAdjustments')}
+            selected={localSettings.includedAdjustments}
+            onChange={(includedAdjustments) => setLocalSettings((prev) => ({ ...prev, includedAdjustments }))}
+          />
         </div>
 
         <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-surface">

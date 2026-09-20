@@ -70,7 +70,10 @@ pub fn get_window_places(app_handle: AppHandle) -> WindowPlaces {
 /// loop waits for the main thread. That fault was reverted three times before
 /// it was understood. See the note at the top of `panel_window.rs`.
 #[tauri::command]
-pub async fn apply_window_places(places: WindowPlaces, app_handle: AppHandle) -> Result<(), String> {
+pub async fn apply_window_places(
+    places: WindowPlaces,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     if let Some(main_window) = app_handle.get_webview_window(MAIN_LABEL) {
         if let Some(place) = places.main {
             // Unmaximised first, because a maximised window ignores being moved
@@ -117,6 +120,11 @@ pub async fn apply_window_places(places: WindowPlaces, app_handle: AppHandle) ->
 /// Used to decide which monitor a window is "on", which is a question with no
 /// exact answer for a window straddling two. Overlap with the larger area wins;
 /// this is the test that feeds that.
+// Nothing calls this today: the monitor question is answered by comparing
+// overlap areas, which needs the area rather than the yes or no. Kept because
+// it is the clearest statement of what "on this screen" means, and its test
+// documents the straddling case.
+#[allow(dead_code)]
 pub fn overlaps(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> bool {
     let (ax, ay, aw, ah) = a;
     let (bx, by, bw, bh) = b;
@@ -292,7 +300,10 @@ mod tests {
     #[test]
     fn a_window_is_on_the_screen_it_sits_on() {
         let screens = [FOUR_K, ULTRAWIDE];
-        assert_eq!(screen_holding(place(-3000, 100, 800, 600), &screens), Some(0));
+        assert_eq!(
+            screen_holding(place(-3000, 100, 800, 600), &screens),
+            Some(0)
+        );
         assert_eq!(screen_holding(place(500, 100, 800, 600), &screens), Some(1));
     }
 
@@ -307,7 +318,10 @@ mod tests {
 
     #[test]
     fn a_window_on_no_screen_at_all_belongs_to_none() {
-        assert_eq!(screen_holding(place(9000, 9000, 100, 100), &[FOUR_K, ULTRAWIDE]), None);
+        assert_eq!(
+            screen_holding(place(9000, 9000, 100, 100), &[FOUR_K, ULTRAWIDE]),
+            None
+        );
     }
 
     #[test]

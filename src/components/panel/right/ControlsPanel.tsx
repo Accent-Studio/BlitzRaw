@@ -5,13 +5,18 @@ import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import BasicAdjustments from '../../adjustments/Basic';
 import CurveGraph from '../../adjustments/Curves';
-import ColorPanel from '../../adjustments/Color';
+import ColorPanel, { ColorCorrectionPanel, ColorMixerPanel } from '../../adjustments/Color';
 import DetailsPanel from '../../adjustments/Details';
 import EffectsPanel from '../../adjustments/Effects';
 import CollapsibleSection from '../../ui/CollapsibleSection';
-import Waveform from '../editor/Waveform';
 import Resizer from '../../ui/Resizer';
-import { Adjustments, SectionVisibility, INITIAL_ADJUSTMENTS, ADJUSTMENT_SECTIONS } from '../../../utils/adjustments';
+import {
+  Adjustments,
+  SectionVisibility,
+  INITIAL_ADJUSTMENTS,
+  ADJUSTMENT_SECTIONS,
+  SECTION_TITLE_KEYS,
+} from '../../../utils/adjustments';
 import { useContextMenu } from '../../../context/ContextMenuContext';
 import { OPTION_SEPARATOR, Orientation } from '../../ui/AppProperties';
 import Text from '../../ui/Text';
@@ -21,13 +26,10 @@ import { useEditorStore } from '../../../store/useEditorStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useUIStore } from '../../../store/useUIStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
-import { useWaveformControls } from '../../../hooks/useWaveformControls';
 
 export default function Controls() {
   const { t } = useTranslation();
   const { showContextMenu } = useContextMenu();
-  const { isResizingWaveform, onToggleWaveform, setActiveWaveformChannel, handleWaveformResize } =
-    useWaveformControls();
   const { setAdjustments, handleAutoAdjustments, handleLutSelect, setLutPreviewOverride } = useEditorActions();
 
   const { appSettings, theme } = useSettingsStore(
@@ -50,10 +52,7 @@ export default function Controls() {
     histogram,
     selectedImage,
     isWbPickerActive,
-    isWaveformVisible,
     waveform,
-    activeWaveformChannel,
-    waveformHeight,
     setEditor,
   } = useEditorStore(
     useShallow((state) => ({
@@ -62,10 +61,7 @@ export default function Controls() {
       histogram: state.histogram,
       selectedImage: state.selectedImage,
       isWbPickerActive: state.isWbPickerActive,
-      isWaveformVisible: state.isWaveformVisible,
       waveform: state.waveform,
-      activeWaveformChannel: state.activeWaveformChannel,
-      waveformHeight: state.waveformHeight,
       setEditor: state.setEditor,
     })),
   );
@@ -86,10 +82,20 @@ export default function Controls() {
   );
 
   const setCollapsibleState = useCallback(
-    (updater: any) =>
-      setUI((state) => ({
-        collapsibleSectionsState: typeof updater === 'function' ? updater(state.collapsibleSectionsState) : updater,
-      })),
+    (updater: any) => {
+      const current = useUIStore.getState().collapsibleSectionsState;
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      setUI({ collapsibleSectionsState: next });
+
+      // BLITZRAW: which sections are open is a preference about the panel, not
+      // about the photo, so it goes to settings rather than to a sidecar.
+      // Without this it lived only in memory and every restart reopened Curves
+      // regardless of what had been left showing.
+      const { appSettings: saved, handleSettingsChange } = useSettingsStore.getState();
+      if (saved) {
+        handleSettingsChange({ ...saved, openAdjustmentSections: next });
+      }
+    },
     [setUI],
   );
 
@@ -221,16 +227,6 @@ export default function Controls() {
             <Aperture size={18} />
           </button>
           <button
-            className={clsx(
-              'p-2 rounded-full transition-colors',
-              isWaveformVisible ? 'bg-surface hover:bg-card-active' : 'hover:bg-surface',
-            )}
-            onClick={onToggleWaveform}
-            data-tooltip={t('editor.adjustments.tooltips.toggleAnalytics')}
-          >
-            <ChartArea size={18} />
-          </button>
-          <button
             className="p-2 rounded-full hover:bg-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             disabled={!selectedImage}
             onClick={handleResetAdjustments}
@@ -241,48 +237,25 @@ export default function Controls() {
         </div>
       </div>
 
-      <AnimatePresence initial={false}>
-        {isWaveformVisible && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: waveformHeight || 256, opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: isResizingWaveform ? 0 : 0.2, ease: 'easeOut' }}
-            className="shrink-0 flex flex-col relative border-b border-surface overflow-hidden"
-          >
-            <div className="grow w-full h-full p-3 pb-2 min-h-0">
-              <Waveform
-                waveformData={waveform || null}
-                histogram={histogram}
-                displayMode={activeWaveformChannel || 'luma'}
-                setDisplayMode={setActiveWaveformChannel}
-                showClipping={adjustments.showClipping || false}
-                onToggleClipping={() => {
-                  setAdjustments((prev: Adjustments) => ({
-                    ...prev,
-                    showClipping: !prev.showClipping,
-                  }));
-                }}
-                theme={theme}
-              />
-            </div>
-            <Resizer direction={Orientation.Horizontal} onMouseDown={handleWaveformResize} />
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* The scopes used to sit here, foldable, and a second copy sat in Masks
+          for when this panel was not the one showing. They are their own panel
+          now, so they can be put anywhere and are visible whatever else is. */}
 
       <div className="grow overflow-y-scroll p-3 flex flex-col gap-2">
         {selectedImage ? (
           Object.keys(ADJUSTMENT_SECTIONS).map((sectionName: string) => {
             const SectionComponent: any = {
               basic: BasicAdjustments,
+              // BLITZRAW: colour is three sections now. See ADJUSTMENT_SECTIONS.
+              colorCorrection: ColorCorrectionPanel,
               curves: CurveGraph,
+              colorMixer: ColorMixerPanel,
               color: ColorPanel,
               details: DetailsPanel,
               effects: EffectsPanel,
             }[sectionName];
 
-            const title = t(`editor.adjustments.sections.${sectionName}`);
+            const title = t(SECTION_TITLE_KEYS[sectionName as keyof typeof SECTION_TITLE_KEYS]);
             const sectionVisibility = adjustments.sectionVisibility || INITIAL_ADJUSTMENTS.sectionVisibility;
 
             return (
@@ -306,6 +279,7 @@ export default function Controls() {
                     isWbPickerActive={isWbPickerActive}
                     toggleWbPicker={toggleWbPicker}
                     onDragStateChange={onDragStateChange}
+                    selectedImage={selectedImage}
                   />
                 </CollapsibleSection>
               </div>

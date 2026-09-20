@@ -31,16 +31,21 @@
   }
 }
 
+/* BLITZRAW: 12px rather than 16px. The adjustments panel is a column of these
+   and the mixer alone is twenty-four of them, so every pixel of thumb is paid
+   for eight times over on one screen. The hit area is not the thumb: the range
+   input is 28px tall and the full width of the row, and it keeps that size, so
+   a smaller thumb is only smaller to look at. */
 @utility slider-input {
   &::-webkit-slider-thumb {
-    @apply h-4 w-4 appearance-none rounded-full bg-accent;
+    @apply h-3 w-3 appearance-none rounded-full bg-accent;
     transition:
       transform 150ms ease-in-out,
       background-color 400ms ease-in-out;
   }
 
   &::-moz-range-thumb {
-    @apply h-4 w-4 rounded-full bg-accent border-none;
+    @apply h-3 w-3 rounded-full bg-accent border-none;
     transition:
       transform 150ms ease-in-out,
       background-color 400ms ease-in-out;
@@ -435,5 +440,35 @@
 @layer utilities {
   .text-shadow-shiny {
     text-shadow: 0 0 18px rgba(255, 255, 255, 0.3);
+  }
+}
+
+/*
+ * BLITZRAW: the busy bar in the library header.
+ *
+ * A sweep across a solid bar rather than one that fills. Most of what makes the
+ * app pause, thumbnail renders above all, reports its progress in bursts or not
+ * at all, so a bar creeping towards a percentage would be inventing a number.
+ * This only claims that something is running, which is the whole question being
+ * asked when the grid goes quiet.
+ */
+@keyframes blitzraw-busy-sweep {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(110%);
+  }
+}
+
+.blitzraw-busy-sweep {
+  background-image: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.65) 50%, transparent 100%);
+  animation: blitzraw-busy-sweep 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blitzraw-busy-sweep {
+    animation: none;
+    background-image: none;
   }
 }

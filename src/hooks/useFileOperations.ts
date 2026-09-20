@@ -8,6 +8,8 @@ import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes } from '../components/ui/AppProperties';
+import { BOTH, EDIT_RULE } from '../utils/imageStacking';
+import { selectionFor } from '../utils/selection';
 import { Status } from '../components/ui/ExportImportProperties';
 
 export function useFileOperations(
@@ -107,7 +109,10 @@ export function useFileOperations(
     const { multiSelectedPaths, imageList } = useLibraryStore.getState();
     const { setUI } = useUIStore.getState();
 
-    const pathsToDelete = multiSelectedPaths;
+    // Deleting a collapsed stack deletes the stack. Both kinds: leaving the
+    // brackets behind after removing the HDR they made is not a tidier result,
+    // it is three orphans. This used to take the one visible frame.
+    const pathsToDelete = selectionFor(BOTH('fullStack'), multiSelectedPaths);
     if (pathsToDelete.length === 0) {
       return;
     }
@@ -119,19 +124,31 @@ export function useFileOperations(
       !pathsToDelete[0].includes('?vc=') &&
       imageList.some((image) => image.path.startsWith(`${pathsToDelete[0]}?vc=`));
 
-    let modalTitle = 'Confirm Delete';
+    // The count goes in the title. It used to sit mid-sentence in the body at
+    // body weight, which is not where anyone looks before clicking Delete, and
+    // it matters more now: a collapsed stack is one click and several files.
+    const count = pathsToDelete.length;
+    let modalTitle = count === 1 ? 'Delete 1 image?' : `Delete ${count} images?`;
     let modalMessage = '';
     let confirmText = 'Delete';
 
+    // Say so when the number is larger than what was clicked, rather than
+    // leaving the reader to work out where the extra files came from.
+    const clicked = multiSelectedPaths.length;
+    const stackNote =
+      count > clicked
+        ? ` This includes every frame of ${clicked === 1 ? 'the stack you selected' : 'the stacks you selected'}.`
+        : '';
+
     if (selectionHasVirtualCopies) {
-      modalTitle = 'Delete Image and All Virtual Copies?';
-      modalMessage = `Are you sure you want to permanently delete this image and all of its virtual copies? This action cannot be undone.`;
+      modalTitle = 'Delete this image and all its virtual copies?';
+      modalMessage = `This cannot be undone.`;
       confirmText = 'Delete All';
     } else if (isSingle) {
-      modalMessage = `Are you sure you want to permanently delete this image? This action cannot be undone. Right-click for more options (e.g., deleting associated files).`;
+      modalMessage = `This cannot be undone. Right-click for more options, such as deleting associated files.`;
       confirmText = 'Delete Selected Only';
     } else {
-      modalMessage = `Are you sure you want to permanently delete these ${pathsToDelete.length} images? This action cannot be undone. Right-click for more options (e.g., deleting associated files).`;
+      modalMessage = `This cannot be undone.${stackNote} Right-click for more options, such as deleting associated files.`;
       confirmText = 'Delete Selected Only';
     }
 
@@ -260,6 +277,9 @@ export function useFileOperations(
   );
 
   const handleRenameFiles = useCallback((paths: Array<string>) => {
+    // A merged result is renamed on its own, since it is the deliverable and
+    // its ingredients are working files. A peer stack renames together.
+    paths = selectionFor(EDIT_RULE, paths);
     if (paths && paths.length > 0) {
       useUIStore.getState().setUI({ renameTargetPaths: paths, isRenameFileModalOpen: true });
     }

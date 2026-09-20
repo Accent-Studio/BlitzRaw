@@ -12,6 +12,8 @@ import { Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppPropert
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
+import { clearPendingNudges, flushPendingNudges, settlePendingNudges, wasNudged } from '../utils/pendingNudges';
+import { sameValue } from '../utils/editHistory';
 
 export interface AppNavigationProps {
   clearThumbnailQueue: () => void;
@@ -93,6 +95,13 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       useEditorStore.getState().patchesSentToBackend.clear();
       debouncedSave.flush();
       debouncedSetHistory.cancel();
+      // BLITZRAW: presses made on the photo being left that never reached the
+      // store, because its sidecar had not come back yet. The backend can still
+      // apply them, since it reads each file before it writes it.
+      flushPendingNudges(selectedImage?.path);
+      // The photo being opened starts with a clean slate, so a count left over
+      // from an earlier visit cannot be spent twice.
+      clearPendingNudges(path);
 
       if (selectedImage?.path && cachedEditStateRef.current) {
         globalImageCache.set(selectedImage.path, cachedEditStateRef.current);
@@ -154,12 +163,21 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
 
         setEditor({ adjustments: cached.adjustments });
         resetHistory(cached.adjustments);
-        prevAdjustmentsRef.current = { path, adjustments: cached.adjustments };
+        prevAdjustmentsRef.current = {
+          path,
+          adjustments: cached.adjustments,
+          setBy: 'opening a photo from the front end cache',
+          setAt: Date.now(),
+        };
 
         setLibrary({ isViewLoading: false });
 
         latestRenderedJobIdRef.current = previewJobIdRef.current;
+        // BLITZRAW: the editor is filled from the front end's own cache, but
+        // the backend has not decoded anything yet. Mirrored into the store so
+        // that whatever is waiting for the backend can be woken when it lands.
         isBackendReadyRef.current = false;
+        setEditor({ isBackendReady: false });
         currentResRef.current = Infinity;
 
         invoke(Invokes.LoadImage, { path })
@@ -167,12 +185,18 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
             if (selectedImagePathRef.current !== path) return;
             isBackendReadyRef.current = true;
             currentResRef.current = 0;
-            setEditor({ originalSize: { width: _result.width, height: _result.height } });
+            setEditor({
+              originalSize: { width: _result.width, height: _result.height },
+              isBackendReady: true,
+            });
           })
           .catch((err: any) => {
             if (String(err).includes('cancelled')) return;
             console.error('Background load_image failed on cache hit:', err);
+            // Released rather than left shut: a failed load is not a reason to
+            // leave every panel that needs the backend waiting forever.
             isBackendReadyRef.current = true;
+            setEditor({ isBackendReady: true });
             currentResRef.current = 0;
           });
 
@@ -185,12 +209,63 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
             } else {
               freshAdjustments = { ...INITIAL_ADJUSTMENTS };
             }
-            if (!isSliderDragging && JSON.stringify(cached.adjustments) !== JSON.stringify(freshAdjustments)) {
+            // BLITZRAW: a nudge made since this photo was opened is newer than
+            // anything this read can say, because the read was already in the
+            // air when the key went down. Overwriting with it is how a press
+            // made in the first moment of a photo vanished a beat later. The
+            // sidecar loses this one; the store's value is saved as usual.
+            const nudgedSinceOpen = wasNudged(path);
+            const takeFreshAdjustments =
+              !isSliderDragging &&
+              !nudgedSinceOpen &&
+              !sameValue(cached.adjustments, freshAdjustments);
+
+            if (takeFreshAdjustments) {
               setEditor({ adjustments: freshAdjustments });
-              resetHistory(freshAdjustments);
-              prevAdjustmentsRef.current = { path, adjustments: freshAdjustments };
+            }
+
+            // ===== BLITZRAW: the log on disk is installed either way =====
+            // These are two separate questions and they used to be one.
+            //
+            // "Has this photo's sidecar been changed by something else, so the
+            // adjustments on screen are out of date?" is usually no, because
+            // the save was flushed on the way out.
+            //
+            // "Where is this photo's history?" is always on disk, and this is
+            // the only place on this path that ever asks for it.
+            //
+            // Welding the second to the first meant that coming back to a photo
+            // through the front end's own cache rebuilt its history from
+            // nothing, found nothing, and installed a single entry reading
+            // "Initial state" over a photo with every one of its edits intact.
+            // It only hit photos edited in an earlier session, because those
+            // are the ones whose history came from disk and is therefore
+            // deliberately not kept in memory. That is the "some of the images"
+            // in the report.
+            //
+            // Nothing is lost by asking every time: `historyFromLog` rebuilds
+            // from the log's own base, and if the photo is not where the log
+            // says it should be, that difference becomes a step of its own.
+            if (!isSliderDragging) {
+              const openingAt = takeFreshAdjustments
+                ? freshAdjustments
+                : useEditorStore.getState().adjustments;
+              resetHistory(openingAt, metadata.history ?? null);
+            }
+            // === BLITZRAW END: the log on disk is installed either way ===
+
+            if (takeFreshAdjustments) {
+              prevAdjustmentsRef.current = {
+                path,
+                adjustments: freshAdjustments,
+                setBy: 'a sidecar read that differed from the cache',
+                setAt: Date.now(),
+              };
               globalImageCache.set(path, { ...cached, adjustments: freshAdjustments });
             }
+            // Spends anything that was still waiting, and closes the slate
+            // either way. See pendingNudges.ts.
+            settlePendingNudges(path);
           })
           .catch((err) => console.error('Failed background metadata sync on cache hit:', err));
 
@@ -215,9 +290,24 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         },
         originalSize: { width: 0, height: 0 },
         previewSize: { width: 0, height: 0 },
-        histogram: null,
-        waveform: null,
         uncroppedAdjustedPreviewUrl: null,
+        isBackendReady: true,
+        // BLITZRAW: the scopes on screen are kept if they are already this
+        // photo's.
+        //
+        // Hovering a frame reads its scopes off its preview without waiting for
+        // a decode, which is the whole point of them following the pointer. But
+        // clicking that same frame threw them away and left the panel blank for
+        // the second and a half the decode takes, so the one moment you most
+        // want them is the one moment they were gone.
+        //
+        // They are only kept when they describe the photo being opened. Opening
+        // one you were not hovering blanks them, and the note of whose they were
+        // is cleared with them: leaving that behind said the panel was showing
+        // this photo when it was showing nothing, so nothing went to fetch them.
+        ...(useEditorStore.getState().scopesPath === path
+          ? {}
+          : { histogram: null, waveform: null, scopesPath: null }),
       });
 
       setLibrary({ isViewLoading: true });
@@ -308,6 +398,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         if (!preserveEditor && selectedImage) {
           debouncedSave.flush();
           debouncedSetHistory.cancel();
+          flushPendingNudges(selectedImage.path);
           setEditor({ selectedImage: null, finalPreviewUrl: null, uncroppedAdjustedPreviewUrl: null, histogram: null });
           setEditor({ adjustments: INITIAL_ADJUSTMENTS });
           resetHistory(INITIAL_ADJUSTMENTS);
@@ -585,6 +676,27 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       } else {
         await handleSelectSubfolder(pathToSelect, false, preloadedImages, false);
       }
+
+      // ============ BLITZRAW: land on the photo I was last on ============
+      // Both handleSelectSubfolder and handleSelectAlbum clear the selection as
+      // they load, so this has to come after they finish rather than before.
+      //
+      // Only if the photo is still in the list. It may have been moved, deleted
+      // or filtered out since, and picking something else instead would be a
+      // guess. Landing at the top is the honest answer in that case.
+      const rememberedPath = folderState?.activePath;
+      if (rememberedPath) {
+        const state = useLibraryStore.getState();
+        if (state.imageList.some((img) => img.path === rememberedPath)) {
+          setLibrary({
+            libraryActivePath: rememberedPath,
+            multiSelectedPaths: [rememberedPath],
+            selectionAnchorPath: rememberedPath,
+            scrollRequest: { path: rememberedPath, id: (state.scrollRequest?.id ?? 0) + 1, center: true },
+          });
+        }
+      }
+      // ========== BLITZRAW END: land on the photo I was last on ==========
     };
 
     restore().catch((err) => {

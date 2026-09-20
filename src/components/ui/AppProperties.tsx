@@ -29,12 +29,19 @@ export const GLOBAL_KEYS = [
 ];
 export const OPTION_SEPARATOR = 'separator';
 
+/** BLITZRAW: which denoiser runs. `scunet` is the strongest and the default
+ *  for raw files; `ai` is the older NIND model; `bm3d` is the one that needs no
+ *  model at all and runs on the processor. */
+export type DenoiseMethod = 'scunet' | 'ai' | 'bm3d';
+
 export enum Invokes {
   AddTagForPaths = 'add_tag_for_paths',
   ApplyAdjustments = 'apply_adjustments',
   ApplyAdjustmentsToPaths = 'apply_adjustments_to_paths',
   ApplyAutoAdjustmentsToPaths = 'apply_auto_adjustments_to_paths',
   ApplyDenoising = 'apply_denoising',
+  /** BLITZRAW: one square of the picture, cleaned, at full size. */
+  DenoisePreviewPatch = 'denoise_preview_patch',
   CalculateAutoAdjustments = 'calculate_auto_adjustments',
   CancelExport = 'cancel_export',
   CheckAIConnectorStatus = 'check_ai_connector_status',
@@ -50,6 +57,8 @@ export enum Invokes {
   DuplicateFile = 'duplicate_file',
   EstimateExportSizes = 'estimate_export_sizes',
   ExportImages = 'export_images',
+  PinExportedState = 'pin_exported_state',
+  ScopesFromSmallPicture = 'scopes_from_small_picture',
   FrontendLog = 'frontend_log',
   GenerateAiForegroundMask = 'generate_ai_foreground_mask',
   GenerateAiSkyMask = 'generate_ai_sky_mask',
@@ -59,6 +68,14 @@ export enum Invokes {
   GenerateMaskOverlay = 'generate_mask_overlay',
   GeneratePresetPreview = 'generate_preset_preview',
   GenerateThumbnailsProgressive = 'generate_thumbnails_progressive',
+  NudgeAdjustmentsForPaths = 'nudge_adjustments_for_paths',
+  GoToSteps = 'go_to_steps',
+  RenderNudgedPreview = 'render_nudged_preview',
+  ForgetNudgedSource = 'forget_nudged_source',
+  BuildPreviewsForPaths = 'build_previews_for_paths',
+  DiscardPreviewsForPaths = 'discard_previews_for_paths',
+  CachedPreviewForPath = 'cached_preview_for_path',
+  CountCachedPreviews = 'count_cached_previews',
   GenerateUncroppedPreview = 'generate_uncropped_preview',
   GetFolderTree = 'get_folder_tree',
   GetFolderChildren = 'get_folder_children',
@@ -126,9 +143,28 @@ export enum Panel {
   Metadata = 'metadata',
   Presets = 'presets',
   FolderTree = 'folderTree',
+  Scopes = 'scopes',
+  Navigator = 'navigator',
+  History = 'history',
 }
 
-export type PanelRegion = 'leftTop' | 'leftBottom' | 'rightTop' | 'rightBottom';
+/**
+ * Where a panel lives.
+ *
+ * The four sidebar regions, plus two that are not in the main window at all:
+ * `floatTop` and `floatBottom` are the column inside the floating window. They
+ * are regions like any other on purpose, so the tab strips, the drag and drop,
+ * the switcher placement and the saved workspace all work there without a
+ * second implementation of any of it. The main window simply never draws them.
+ */
+export type PanelRegion = 'leftTop' | 'leftBottom' | 'rightTop' | 'rightBottom' | 'floatTop' | 'floatBottom';
+
+/** The regions that belong to the floating window rather than the sidebars. */
+export const FLOATING_REGIONS: Array<PanelRegion> = ['floatTop', 'floatBottom'];
+
+export function isFloatingRegion(region: PanelRegion): boolean {
+  return FLOATING_REGIONS.includes(region);
+}
 
 export enum RawStatus {
   All = 'all',
@@ -199,6 +235,12 @@ export interface AppSettings {
   sortCriteria?: SortCriteria;
   theme: Theme;
   thumbnailSize?: ThumbnailSize;
+  /**
+   * BLITZRAW: the grid's minimum cell width in pixels. Written alongside the
+   * old thumbnailSize rather than replacing it, so a settings file stays
+   * readable by a build that predates the slider.
+   */
+  thumbnailSizePx?: number;
   thumbnailAspectRatio?: ThumbnailAspectRatio;
   uiVisibility?: UiVisibility;
   adjustmentVisibility?: { [key: string]: boolean };
@@ -214,10 +256,27 @@ export interface AppSettings {
   createXmpIfMissing?: boolean;
   isWaveformVisible?: boolean;
   waveformHeight?: number;
+  /** Layouts the user asked to keep, by name. Separate from the one that autosaves. */
+  layoutProfiles?: Array<{ name: string; workspace: unknown }>;
   activeWaveformChannel?: string;
+  waveformChannels?: Array<string>;
+  vectorscopeGain?: number;
+  scopeHeights?: Array<number>;
+  /** How many edit steps each photo keeps. See editHistory.ts. */
+  historyStepLimit?: number;
   useWgpuRenderer?: boolean;
   canvasInputMode?: 'mouse' | 'trackpad';
   zoomSpeedMultiplier?: number;
+  /**
+   * Sliders added to Quick Adjustments by right-clicking them. The three that
+   * ship are not stored here; only what the user added.
+   */
+  quickAdjustments?: Array<{ id: string; path: string; step: number; min: number; max: number; label?: string }>;
+  /**
+   * Which sections of the Adjustments panel are left open. A preference about
+   * the panel, not about a photo, so it is kept here rather than in a sidecar.
+   */
+  openAdjustmentSections?: { [section: string]: boolean };
   keybinds?: { [action: string]: string[] };
   tonemapperOverrideEnabled?: boolean;
   defaultRawTonemapper?: string;
@@ -233,6 +292,11 @@ export interface AppSettings {
   taggingShortcuts?: string[];
   libraryDisplayMode?: LibraryDisplayMode;
   grouping?: GroupingMode;
+  /** Skip the splash screen and reopen the last folder on launch. */
+  autoContinueSession?: boolean;
+  /** Align bracket frames before merging to HDR. Off by default; see the merge
+   *  confirmation, which carries the toggle and remembers the choice. */
+  hdrAutoAlign?: boolean;
   requireMatchingExif?: boolean;
   groupEditedFiles?: boolean;
   groupPreferredType?: GroupPreference; // legacy
@@ -283,7 +347,12 @@ export interface ImageFile {
   is_virtual_copy: boolean;
   is_cloud_placeholder: boolean;
   is_raw: boolean;
+  /** Ties together several files of one capture, e.g. a NEF and its JPEG. */
   group_id: string | null;
+  /** Ties together several captures the user stacked, e.g. an exposure bracket. */
+  stack_id?: string | null;
+  /** The frame shown when its stack is closed, where one was chosen explicitly. */
+  is_stack_leader?: boolean;
 }
 
 export interface Option {
@@ -308,6 +377,12 @@ export interface Preset {
   folder?: Folder;
   id: string;
   name: string;
+  /**
+   * Which adjustment groups the preset carries, by key. Absent on presets
+   * saved before the full list existed, which recorded only the two booleans
+   * below; those are kept so an old preset still reads correctly.
+   */
+  includedAdjustments?: Array<string>;
   includeMasks?: boolean;
   includeCropTransform?: boolean;
   presetType?: 'tool' | 'style';
@@ -349,6 +424,25 @@ export enum LibraryDisplayMode {
   Cull = 'cull',
   List = 'list',
 }
+
+/**
+ * BLITZRAW: the grid's minimum cell width, in pixels.
+ *
+ * Replaces the three fixed sizes below, which topped out at 320 and left a
+ * large screen showing postage stamps. The old names are kept only to read a
+ * settings file written before this, through LEGACY_THUMBNAIL_SIZES.
+ */
+export const THUMBNAIL_SIZE_MIN = 200;
+export const THUMBNAIL_SIZE_MAX = 800;
+export const THUMBNAIL_SIZE_STEP = 20;
+export const THUMBNAIL_SIZE_DEFAULT = 240;
+export const THUMBNAIL_SIZE_DEFAULT_ANDROID = 200;
+
+export const LEGACY_THUMBNAIL_SIZES: { [key: string]: number } = {
+  small: 200,
+  medium: 240,
+  large: 320,
+};
 
 export enum ThumbnailSize {
   Large = 'large',

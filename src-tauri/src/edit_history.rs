@@ -360,12 +360,10 @@ pub fn record(
                 // The step keeps the "before" it opened with, so a run of ten
                 // nudges reads from where it started to where it ended.
                 Some(existing) => {
-                    if let (Some(existing), Some(now)) =
-                        (existing.as_array_mut(), arriving.get(1))
+                    if let (Some(existing), Some(now)) = (existing.as_array_mut(), arriving.get(1))
+                        && existing.len() == 2
                     {
-                        if existing.len() == 2 {
-                            existing[1] = now.clone();
-                        }
+                        existing[1] = now.clone();
                     }
                 }
                 None => {
@@ -384,10 +382,14 @@ pub fn record(
         if entry.is_empty() {
             let dropped = history.entries.pop();
             // The bookmark comes back to whatever is now on top, or to the base.
-            if let Some(dropped) = dropped {
-                if history.at == dropped.n {
-                    history.at = history.entries.last().map(|s| s.n).unwrap_or(history.base_n);
-                }
+            if let Some(dropped) = dropped
+                && history.at == dropped.n
+            {
+                history.at = history
+                    .entries
+                    .last()
+                    .map(|s| s.n)
+                    .unwrap_or(history.base_n);
             }
         }
         return history;
@@ -553,7 +555,11 @@ pub fn go_to(history: &mut EditHistory, n: u64) -> Result<AtStep, CannotGo> {
 pub fn bookmark(history: Option<&EditHistory>) -> u64 {
     let Some(history) = history else { return 0 };
     if history.next_n == 0 {
-        return history.entries.last().map(|s| s.n).unwrap_or(history.base_n);
+        return history
+            .entries
+            .last()
+            .map(|s| s.n)
+            .unwrap_or(history.base_n);
     }
     history.at
 }
@@ -565,7 +571,13 @@ pub fn bookmark(history: Option<&EditHistory>) -> u64 {
 /// Used for exports, so that what left the building can always be got back to,
 /// and for snapshots taken by hand. A whole state rather than a delta because
 /// it has to survive everything around it being folded away.
-pub fn pin(history: Option<EditHistory>, state: &Value, label: &str, kind: &str, at: String) -> EditHistory {
+pub fn pin(
+    history: Option<EditHistory>,
+    state: &Value,
+    label: &str,
+    kind: &str,
+    at: String,
+) -> EditHistory {
     let mut history = match history {
         Some(held) if held.version == HISTORY_VERSION => held,
         _ => EditHistory {
@@ -642,6 +654,10 @@ fn fold_to_limit(history: &mut EditHistory, limit: usize) {
 ///
 /// The base, then one for each step. The editor works in whole states, so this
 /// is what it is handed; the log is only how they are stored.
+// Nothing calls this today: the editor asks for one state at a time rather than
+// the whole run. Kept because it is the plain statement of what the log means,
+// and the next thing that wants a whole history will want exactly this.
+#[allow(dead_code)]
 pub fn states(history: &EditHistory) -> Vec<Value> {
     let mut out = Vec::with_capacity(history.entries.len() + 1);
     let mut current = history.base.clone();
@@ -710,7 +726,10 @@ mod tests {
     fn the_base_is_where_the_photo_was_before_the_first_step() {
         let history = recorded(json!({ "exposure": 0.2 }), json!({ "exposure": 0.9 }));
         assert_eq!(history.base, json!({ "exposure": 0.2 }));
-        assert_eq!(states(&history).last().unwrap(), &json!({ "exposure": 0.9 }));
+        assert_eq!(
+            states(&history).last().unwrap(),
+            &json!({ "exposure": 0.9 })
+        );
     }
 
     /// A number that came back from the front end without its decimal point is
@@ -724,7 +743,10 @@ mod tests {
         for (before, after) in [
             (json!({ "kelvin": 4700.0 }), json!({ "kelvin": 4700 })),
             (json!({ "model": 1 }), json!({ "model": 1.0 })),
-            (json!({ "p": { "model": 1, "k1": 0.5 } }), json!({ "p": { "model": 1.0, "k1": 0.5 } })),
+            (
+                json!({ "p": { "model": 1, "k1": 0.5 } }),
+                json!({ "p": { "model": 1.0, "k1": 0.5 } }),
+            ),
             (json!({ "p": [1, 2.0] }), json!({ "p": [1.0, 2] })),
         ] {
             assert!(
@@ -739,10 +761,16 @@ mod tests {
     fn a_number_that_really_moved_is_still_a_change() {
         for (before, after) in [
             (json!({ "kelvin": 4700 }), json!({ "kelvin": 4701 })),
-            (json!({ "p": { "model": 1 } }), json!({ "p": { "model": 2 } })),
+            (
+                json!({ "p": { "model": 1 } }),
+                json!({ "p": { "model": 2 } }),
+            ),
             (json!({ "p": [1, 2] }), json!({ "p": [1, 3] })),
             (json!({ "p": [1, 2] }), json!({ "p": [1] })),
-            (json!({ "p": { "a": 1 } }), json!({ "p": { "a": 1, "b": 2 } })),
+            (
+                json!({ "p": { "a": 1 } }),
+                json!({ "p": { "a": 1, "b": 2 } }),
+            ),
         ] {
             assert!(
                 !changed_between(&before, &after).is_empty(),
@@ -761,7 +789,10 @@ mod tests {
     #[test]
     fn a_key_that_was_not_there_before_still_counts() {
         let history = recorded(json!({}), json!({ "exposure": 0.5 }));
-        assert_eq!(history.entries[0].changed.as_ref().unwrap()["exposure"], json!([null, 0.5]));
+        assert_eq!(
+            history.entries[0].changed.as_ref().unwrap()["exposure"],
+            json!([null, 0.5])
+        );
     }
 
     #[test]
@@ -816,7 +847,11 @@ mod tests {
             &json!({ "exposure": 0.4, "contrast": 20 }),
             how(10, None),
         );
-        assert_eq!(history.entries.len(), 2, "a change of tool is a change of mind");
+        assert_eq!(
+            history.entries.len(),
+            2,
+            "a change of tool is a change of mind"
+        );
     }
 
     /// A timestamp nothing can read is not evidence that a run is still going.
@@ -877,7 +912,10 @@ mod tests {
             &json!({ "exposure": 1.0, "sectionVisibility": { "basic": false } }),
             how(0, None),
         );
-        assert!(history.entries.is_empty(), "a view setting is not something done to the photo");
+        assert!(
+            history.entries.is_empty(),
+            "a view setting is not something done to the photo"
+        );
     }
 
     #[test]
@@ -904,7 +942,10 @@ mod tests {
         assert_eq!(history.entries.len(), 1);
         let changed = history.entries[0].changed.as_ref().unwrap();
         assert!(changed.contains_key("exposure"));
-        assert!(!changed.contains_key("showClipping"), "the view setting is not part of the step");
+        assert!(
+            !changed.contains_key("showClipping"),
+            "the view setting is not part of the step"
+        );
     }
 
     // ====== BLITZRAW END: a view setting is not an edit ======
@@ -913,18 +954,38 @@ mod tests {
 
     #[test]
     fn every_step_gets_its_own_number_and_the_bookmark_follows() {
-        let mut h = record(None, &json!({ "exposure": 0.0 }), &json!({ "exposure": 1.0 }), how(0, None));
+        let mut h = record(
+            None,
+            &json!({ "exposure": 0.0 }),
+            &json!({ "exposure": 1.0 }),
+            how(0, None),
+        );
         assert_eq!(h.entries[0].n, 1);
         assert_eq!(h.at, 1, "a new step is where the photo now is");
-        h = record(Some(h), &json!({ "exposure": 1.0 }), &json!({ "contrast": 5.0 }), how(60_000, None));
+        h = record(
+            Some(h),
+            &json!({ "exposure": 1.0 }),
+            &json!({ "contrast": 5.0 }),
+            how(60_000, None),
+        );
         assert_eq!(h.entries[1].n, 2);
         assert_eq!(h.at, 2);
     }
 
     #[test]
     fn an_undo_moves_the_bookmark_and_writes_nothing() {
-        let mut h = record(None, &json!({ "exposure": 0.0 }), &json!({ "exposure": 1.0 }), how(0, None));
-        h = record(Some(h), &json!({ "exposure": 1.0 }), &json!({ "exposure": 2.0 }), how(60_000, None));
+        let mut h = record(
+            None,
+            &json!({ "exposure": 0.0 }),
+            &json!({ "exposure": 1.0 }),
+            how(0, None),
+        );
+        h = record(
+            Some(h),
+            &json!({ "exposure": 1.0 }),
+            &json!({ "exposure": 2.0 }),
+            how(60_000, None),
+        );
         let before = h.entries.clone();
 
         let landed = go_to(&mut h, 1).unwrap();
@@ -935,8 +996,18 @@ mod tests {
 
     #[test]
     fn a_redo_is_the_same_move_the_other_way() {
-        let mut h = record(None, &json!({ "exposure": 0.0 }), &json!({ "exposure": 1.0 }), how(0, None));
-        h = record(Some(h), &json!({ "exposure": 1.0 }), &json!({ "exposure": 2.0 }), how(60_000, None));
+        let mut h = record(
+            None,
+            &json!({ "exposure": 0.0 }),
+            &json!({ "exposure": 1.0 }),
+            how(0, None),
+        );
+        h = record(
+            Some(h),
+            &json!({ "exposure": 1.0 }),
+            &json!({ "exposure": 2.0 }),
+            how(60_000, None),
+        );
         go_to(&mut h, 1).unwrap();
         let landed = go_to(&mut h, 2).unwrap();
         assert_eq!(landed.state["exposure"], json!(2.0));
@@ -945,22 +1016,54 @@ mod tests {
 
     #[test]
     fn the_base_is_a_real_place_to_go_back_to() {
-        let mut h = record(None, &json!({ "exposure": 0.0 }), &json!({ "exposure": 1.0 }), how(0, None));
+        let mut h = record(
+            None,
+            &json!({ "exposure": 0.0 }),
+            &json!({ "exposure": 1.0 }),
+            how(0, None),
+        );
         let landed = go_to(&mut h, 0).unwrap();
-        assert_eq!(landed.state["exposure"], json!(0.0), "all the way back to where it started");
+        assert_eq!(
+            landed.state["exposure"],
+            json!(0.0),
+            "all the way back to where it started"
+        );
         assert_eq!(h.at, 0);
     }
 
     #[test]
     fn an_edit_after_an_undo_drops_what_was_above_and_never_reuses_the_number() {
-        let mut h = record(None, &json!({ "exposure": 0.0 }), &json!({ "exposure": 1.0 }), how(0, None));
-        h = record(Some(h), &json!({ "exposure": 1.0 }), &json!({ "exposure": 2.0 }), how(60_000, None));
-        h = record(Some(h), &json!({ "exposure": 2.0 }), &json!({ "exposure": 3.0 }), how(120_000, None));
+        let mut h = record(
+            None,
+            &json!({ "exposure": 0.0 }),
+            &json!({ "exposure": 1.0 }),
+            how(0, None),
+        );
+        h = record(
+            Some(h),
+            &json!({ "exposure": 1.0 }),
+            &json!({ "exposure": 2.0 }),
+            how(60_000, None),
+        );
+        h = record(
+            Some(h),
+            &json!({ "exposure": 2.0 }),
+            &json!({ "exposure": 3.0 }),
+            how(120_000, None),
+        );
         go_to(&mut h, 1).unwrap();
 
-        h = record(Some(h), &json!({ "exposure": 1.0 }), &json!({ "exposure": 9.0 }), how(180_000, None));
+        h = record(
+            Some(h),
+            &json!({ "exposure": 1.0 }),
+            &json!({ "exposure": 9.0 }),
+            how(180_000, None),
+        );
         assert_eq!(h.entries.len(), 2, "the path nobody took is gone");
-        assert_eq!(h.entries[1].n, 4, "and the new step gets a number never used before");
+        assert_eq!(
+            h.entries[1].n, 4,
+            "and the new step gets a number never used before"
+        );
         assert_eq!(h.at, 4);
         assert!(
             matches!(state_at(Some(&h), 2), Err(CannotGo::NotHere)),
@@ -990,16 +1093,35 @@ mod tests {
         let h = h.unwrap();
         assert_eq!(h.entries.len(), MIN_STEP_LIMIT);
         let top = (MIN_STEP_LIMIT + 5) as u64;
-        assert_eq!(h.entries.last().unwrap().n, top, "the newest keeps its number");
+        assert_eq!(
+            h.entries.last().unwrap().n,
+            top,
+            "the newest keeps its number"
+        );
         assert_eq!(h.at, top, "and the photo is sitting on it");
-        assert_eq!(h.base_n, top - MIN_STEP_LIMIT as u64, "the base stands where the last folded step stood");
-        assert!(matches!(state_at(Some(&h), 1), Err(CannotGo::NotHere)), "what folded away is gone");
-        assert!(state_at(Some(&h), h.base_n).is_ok(), "and the base itself is reachable");
+        assert_eq!(
+            h.base_n,
+            top - MIN_STEP_LIMIT as u64,
+            "the base stands where the last folded step stood"
+        );
+        assert!(
+            matches!(state_at(Some(&h), 1), Err(CannotGo::NotHere)),
+            "what folded away is gone"
+        );
+        assert!(
+            state_at(Some(&h), h.base_n).is_ok(),
+            "and the base itself is reachable"
+        );
     }
 
     #[test]
     fn a_number_this_photo_never_had_is_refused_rather_than_guessed_at() {
-        let h = record(None, &json!({ "exposure": 0.0 }), &json!({ "exposure": 1.0 }), how(0, None));
+        let h = record(
+            None,
+            &json!({ "exposure": 0.0 }),
+            &json!({ "exposure": 1.0 }),
+            how(0, None),
+        );
         assert!(matches!(state_at(Some(&h), 99), Err(CannotGo::NotHere)));
         assert!(matches!(state_at(None, 1), Err(CannotGo::NoHistory)));
     }
@@ -1008,8 +1130,18 @@ mod tests {
     fn a_run_on_one_slider_keeps_one_number() {
         // Joining is what makes ten nudges one step. It must not hand out ten
         // numbers, or the application would hold ten entries for one move.
-        let mut h = record(None, &json!({ "exposure": 0.0 }), &json!({ "exposure": 0.5 }), how(0, None));
-        h = record(Some(h), &json!({ "exposure": 0.5 }), &json!({ "exposure": 1.0 }), how(200, None));
+        let mut h = record(
+            None,
+            &json!({ "exposure": 0.0 }),
+            &json!({ "exposure": 0.5 }),
+            how(0, None),
+        );
+        h = record(
+            Some(h),
+            &json!({ "exposure": 0.5 }),
+            &json!({ "exposure": 1.0 }),
+            how(200, None),
+        );
         assert_eq!(h.entries.len(), 1);
         assert_eq!(h.entries[0].n, 1);
         assert_eq!(h.at, 1);
@@ -1025,7 +1157,11 @@ mod tests {
         let read: EditHistory = serde_json::from_str(older).unwrap();
         assert_eq!(read.at, 0);
         assert_eq!(read.next_n, 0);
-        assert_eq!(bookmark(Some(&read)), 0, "its one step is unnumbered, so it reads as the base");
+        assert_eq!(
+            bookmark(Some(&read)),
+            0,
+            "its one step is unnumbered, so it reads as the base"
+        );
 
         let grown = record(
             Some(read),
@@ -1173,7 +1309,10 @@ mod tests {
 
     #[test]
     fn every_state_can_be_rebuilt_from_the_log() {
-        let mut history = recorded(json!({ "exposure": 0.0, "contrast": 0 }), json!({ "exposure": 0.5, "contrast": 0 }));
+        let mut history = recorded(
+            json!({ "exposure": 0.0, "contrast": 0 }),
+            json!({ "exposure": 0.5, "contrast": 0 }),
+        );
         history = record(
             Some(history),
             &json!({ "exposure": 0.5, "contrast": 0 }),
@@ -1220,7 +1359,13 @@ mod tests {
 
     #[test]
     fn a_pinned_step_is_never_folded_away() {
-        let mut history = pin(None, &json!({ "exposure": 0.0 }), "Exported", "export", clock(0));
+        let mut history = pin(
+            None,
+            &json!({ "exposure": 0.0 }),
+            "Exported",
+            "export",
+            clock(0),
+        );
         for step in 1..=(MIN_STEP_LIMIT + 5) {
             history = record(
                 Some(history),
@@ -1247,7 +1392,13 @@ mod tests {
 
     #[test]
     fn a_pinned_state_survives_the_base_being_folded_past_it() {
-        let history = pin(None, &json!({ "exposure": 7.0 }), "Exported", "export", clock(0));
+        let history = pin(
+            None,
+            &json!({ "exposure": 7.0 }),
+            "Exported",
+            "export",
+            clock(0),
+        );
         let history = record(
             Some(history),
             &json!({ "exposure": 7.0 }),
@@ -1361,8 +1512,8 @@ mod tests {
             let json = format!(
                 r#"{{ "version": 1, "rating": 2, "adjustments": {{ "exposure": 0.4 }}, "history": {bad} }}"#
             );
-            let metadata: crate::image_processing::ImageMetadata =
-                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{bad} should not fail: {e}"));
+            let metadata: crate::image_processing::ImageMetadata = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{bad} should not fail: {e}"));
             assert!(metadata.history.is_none(), "{bad}");
             assert_eq!(metadata.adjustments, json!({ "exposure": 0.4 }), "{bad}");
             assert_eq!(metadata.rating, 2, "{bad}");

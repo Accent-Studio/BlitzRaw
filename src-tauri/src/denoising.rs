@@ -1337,7 +1337,7 @@ mod noise_probe {
 
         let radii: Vec<f32> = BASE_RADII
             .iter()
-            .map(|b| (b * scale).ceil().max(1.0).min(REACH_CAP))
+            .map(|b| (b * scale).ceil().clamp(1.0, REACH_CAP))
             .collect();
         println!(
             "radii      {:.0}, {:.0}, {:.0} px{}",
@@ -1453,9 +1453,8 @@ mod noise_probe {
         };
 
         let resources = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
-        let models = std::path::PathBuf::from(
-            std::env::var("RAPIDRAW_TEST_MODELS_DIR").unwrap_or_default(),
-        );
+        let models =
+            std::path::PathBuf::from(std::env::var("RAPIDRAW_TEST_MODELS_DIR").unwrap_or_default());
         let model_path = models.join("scunet_color_real_psnr.onnx");
         if !model_path.exists() {
             eprintln!("RAPIDRAW_TEST_MODELS_DIR must hold scunet_color_real_psnr.onnx, skipping");
@@ -1464,7 +1463,10 @@ mod noise_probe {
         unsafe {
             std::env::set_var("ORT_DYLIB_PATH", resources.join("onnxruntime.dll"));
             let existing = std::env::var("PATH").unwrap_or_default();
-            std::env::set_var("PATH", format!("{};{existing}", resources.to_string_lossy()));
+            std::env::set_var(
+                "PATH",
+                format!("{};{existing}", resources.to_string_lossy()),
+            );
         }
 
         let bytes = std::fs::read(&path).expect("could not read the file");
@@ -1653,6 +1655,5 @@ mod noise_probe {
         println!("  A threshold for a band is a few times the number on its row.");
         println!();
     }
-
 }
 // ========== BLITZRAW END: what the noise in a real frame measures ==========

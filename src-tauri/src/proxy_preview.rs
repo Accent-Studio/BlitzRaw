@@ -52,11 +52,10 @@
 //! couple of seconds and shows the truth.
 
 use crate::AppState;
+use crate::image_processing::{AllAdjustments, get_all_adjustments_from_json, rows_to_gpu_mat3};
 use image::DynamicImage;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
-use crate::image_processing::{AllAdjustments, get_all_adjustments_from_json, rows_to_gpu_mat3};
-use serde_json::Value;
 use tauri::AppHandle;
 use tauri::Manager;
 
@@ -171,7 +170,9 @@ fn adjustments_for(nudge: &Nudge, path: &str) -> AllAdjustments {
             // No calibration to work from, so no Kelvin either: on such a file
             // the editor's temperature is the old relative one, and the nudge
             // arrives as a plain difference the shader applies directly.
-            log::debug!("No usable white balance matrix for {path}; the nudge keeps its exposure only");
+            log::debug!(
+                "No usable white balance matrix for {path}; the nudge keeps its exposure only"
+            );
         }
     }
     all
@@ -268,7 +269,10 @@ mod tests {
         forget_source();
         let first = source_picture(&one).expect("opened");
         let again = source_picture(&one).expect("opened");
-        assert!(Arc::ptr_eq(&first, &again), "the same photo is not decoded twice");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the same photo is not decoded twice"
+        );
 
         let other = source_picture(&two).expect("opened");
         assert_eq!(other.width(), 16, "and another photo is decoded");

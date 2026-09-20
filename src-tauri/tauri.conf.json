@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "identifier": "io.github.CyberTimon.RapidRAW",
+  "productName": "BlitzRaw",
+  "identifier": "com.blitzraw.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +13,7 @@
       {
         "label": "main",
         "create": false,
-        "title": "RapidRAW",
+        "title": "BlitzRaw",
         "width": 1280,
         "height": 720,
         "minWidth": 800,

@@ -65,7 +65,8 @@ mod tests {
     fn the_events_that_matter_do_not_use_a_plain_broadcast() {
         let lib = include_str!("lib.rs");
 
-        for event in ["analytics-update"] {
+        {
+            let event = "analytics-update";
             let broadcast = format!("app_handle.emit(\n                    \"{event}\"");
             assert!(
                 !lib.contains(&broadcast),

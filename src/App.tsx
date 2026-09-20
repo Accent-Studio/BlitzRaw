@@ -18,6 +18,9 @@ import SidePanelArea from './components/panel/SidePanelArea';
 import { PANEL_ICONS } from './components/panel/PanelSwitcher';
 import Controls from './components/panel/right/ControlsPanel';
 import MetadataPanel from './components/panel/right/MetadataPanel';
+import ScopesPanel from './components/panel/right/ScopesPanel';
+import NavigatorPanel from './components/panel/right/NavigatorPanel';
+import HistoryPanel from './components/panel/right/HistoryPanel';
 import CropPanel from './components/panel/right/CropPanel';
 import MasksPanel from './components/panel/right/MasksPanel';
 import AIPanel from './components/panel/right/AIPanel';
@@ -28,7 +31,7 @@ import LibraryView from './components/views/LibraryView';
 
 import { ContextMenuProvider } from './context/ContextMenuContext';
 import { useSettingsStore } from './store/useSettingsStore';
-import { useUIStore } from './store/useUIStore';
+import { isPanelShowing, useUIStore } from './store/useUIStore';
 import { useLibraryStore } from './store/useLibraryStore';
 import { useEditorStore } from './store/useEditorStore';
 import { useProcessStore } from './store/useProcessStore';
@@ -41,6 +44,8 @@ import { useTauriListeners } from './hooks/useTauriListeners';
 import { useFileOperations } from './hooks/useFileOperations';
 import { useAppContextMenus } from './hooks/useAppContextMenus';
 import { useSortedLibrary } from './hooks/useSortedLibrary';
+import { useFilteredSelection } from './hooks/useFilteredSelection';
+import { useRawCompression } from './hooks/useRawCompression';
 import { useAppNavigation } from './hooks/useAppNavigation';
 import { useExternalEditSession } from './hooks/useExternalEditSession';
 import ExternalEditBar from './components/ui/ExternalEditBar';
@@ -61,12 +66,15 @@ import {
   Panel,
   PanelRegion,
   Theme,
-  ThumbnailSize,
+  THUMBNAIL_SIZE_DEFAULT,
+  THUMBNAIL_SIZE_DEFAULT_ANDROID,
   ThumbnailAspectRatio,
 } from './components/ui/AppProperties';
 
 import ImageProcessingManager from './components/managers/ImageProcessingManager';
 import ImageLoaderManager from './components/managers/ImageLoaderManager';
+import { canDetach, useDetachPanel } from './hooks/useDetachPanel';
+import { useViewPanel } from './hooks/useViewPanel';
 
 const CLERK_PUBLISHABLE_KEY = 'pk_test_YnJpZWYtc2Vhc25haWwtMTIuY2xlcmsuYWNjb3VudHMuZGV2JA'; // local dev key
 
@@ -118,6 +126,7 @@ function App() {
     rightPanelWidth,
     compactEditorPanelHeightOverride,
     activePanel,
+    activePanels,
     activeLayoutDragItem,
     isSettingsOpen,
     setUI,
@@ -137,6 +146,7 @@ function App() {
       rightPanelWidth: state.rightPanelWidth,
       compactEditorPanelHeightOverride: state.compactEditorPanelHeightOverride,
       activePanel: state.activePanel,
+      activePanels: state.activePanels,
       activeLayoutDragItem: state.activeLayoutDragItem,
       isSettingsOpen: state.isSettingsOpen,
       setUI: state.setUI,
@@ -145,6 +155,14 @@ function App() {
       movePanel: state.movePanel,
     })),
   );
+
+  // BLITZRAW: the left side follows the view. Grid is for choosing a photo, so
+  // it shows the folders; full view is for working on one, so it shows that
+  // photo's history. Only on arriving, so switching panel by hand inside a view
+  // is left alone. See LEFT_PANEL_FOR_VIEW in utils/panelLayout.ts.
+  useEffect(() => {
+    useUIStore.getState().showLeftPanelForView(activeView);
+  }, [activeView]);
 
   const { rootPaths, currentFolderPath, expandedFolders, multiSelectedPaths, setLibrary } = useLibraryStore(
     useShallow((state) => ({
@@ -174,7 +192,7 @@ function App() {
     })),
   );
 
-  const defaultThumbnailSize = osPlatform === 'android' ? ThumbnailSize.Small : ThumbnailSize.Medium;
+  const defaultThumbnailSize = osPlatform === 'android' ? THUMBNAIL_SIZE_DEFAULT_ANDROID : THUMBNAIL_SIZE_DEFAULT;
   const defaultLibraryViewMode = osPlatform === 'android' ? LibraryViewMode.Recursive : LibraryViewMode.Flat;
 
   const selectedImagePathRef = useRef<string | null>(null);
@@ -294,6 +312,30 @@ function App() {
     refs: navigationRefs,
   });
 
+  // Reopen the last folder without showing the splash, when asked to. Guarded by
+  // a ref so it fires once per launch and never fights a folder the user has
+  // already opened, including one passed in by a file association.
+  const hasAutoContinued = useRef(false);
+  useEffect(() => {
+    if (hasAutoContinued.current || !appSettings) {
+      return;
+    }
+    if (!appSettings.autoContinueSession) {
+      return;
+    }
+    if (currentFolderPath) {
+      // Something already opened a folder; nothing to restore over the top of.
+      hasAutoContinued.current = true;
+      return;
+    }
+    const hasLastPath = !!appSettings.lastRootPath || !!appSettings.rootFolders?.length;
+    if (!hasLastPath) {
+      return;
+    }
+    hasAutoContinued.current = true;
+    handleContinueSession();
+  }, [appSettings, currentFolderPath, handleContinueSession]);
+
   const {
     externalEditSession,
     isFinishing: isExternalEditFinishing,
@@ -312,7 +354,16 @@ function App() {
     handleRenameAlbumItem,
   } = useLibraryActions(handleImageSelect);
 
-  const { displayList: sortedImageList, badges: groupBadgeInfo } = useSortedLibrary();
+  const { displayList: sortedImageList, badges: groupBadgeInfo, stackInfo } = useSortedLibrary();
+
+  // BLITZRAW: a photo that drops out of the filter takes the selection with it,
+  // instead of leaving it pointing at something nothing is drawing.
+  useFilteredSelection(sortedImageList, handleImageSelect);
+
+  // Marks RAW files whose compression no open source decoder can read, so a
+  // silent fallback to the embedded JPEG is visible before anyone edits one.
+  useRawCompression(sortedImageList);
+  const rawCompression = useLibraryStore((state) => state.rawCompression);
 
   const handleLibraryRefresh = useCallback(async () => {
     if (currentFolderPath) {
@@ -374,6 +425,7 @@ function App() {
     handleAlbumTreeContextMenu,
     handleMainLibraryContextMenu,
   } = useAppContextMenus({
+    prevAdjustmentsRef,
     handleImageSelect,
     handleBackToLibrary,
     handleLibraryRefresh,
@@ -413,6 +465,7 @@ function App() {
 
   useKeyboardShortcuts({
     sortedImageList,
+    prevAdjustmentsRef,
     handleBackToLibrary,
     handleDeleteSelected,
     handleImageSelect,
@@ -459,13 +512,14 @@ function App() {
   const isLightTheme = useMemo(() => [Theme.Light, Theme.Snow, Theme.Arctic].includes(theme as Theme), [theme]);
 
   useEffect(() => {
-    if (
-      (activePanel !== Panel.Masks || !activeMaskContainerId) &&
-      (activePanel !== Panel.Ai || !activeAiPatchContainerId)
-    ) {
+    // BLITZRAW: asks the sidebar that holds the panel, not the global "last
+    // panel activated anywhere". See `isPanelShowing` in useUIStore.
+    const masksShowing = isPanelShowing(activePanels, Panel.Masks);
+    const aiShowing = isPanelShowing(activePanels, Panel.Ai);
+    if ((!masksShowing || !activeMaskContainerId) && (!aiShowing || !activeAiPatchContainerId)) {
       setEditor({ isMaskControlHovered: false });
     }
-  }, [activePanel, activeMaskContainerId, activeAiPatchContainerId, setEditor]);
+  }, [activePanels, activeMaskContainerId, activeAiPatchContainerId, setEditor]);
 
   useEffect(() => {
     const unlisten = listen('ai-connector-status-update', (event: any) => {
@@ -653,6 +707,12 @@ function App() {
           );
         case Panel.Adjustments:
           return <Controls />;
+        case Panel.Scopes:
+          return <ScopesPanel />;
+        case Panel.Navigator:
+          return <NavigatorPanel />;
+        case Panel.History:
+          return <HistoryPanel />;
         case Panel.Metadata:
           return <MetadataPanel />;
         case Panel.Crop:
@@ -704,13 +764,32 @@ function App() {
       setLayoutDragItem(e.active.data.current.panel as Panel);
     }
   };
+  const { detach } = useDetachPanel();
+  // The grid and the editor want different things in the left column: the
+  // folder tree for choosing what to work on, the history for working on it.
+  useViewPanel();
   const handleDragEnd = (e: any) => {
     setLayoutDragItem(null);
-    if (e.active.data.current?.type === 'layout-tab' && e.over?.data.current?.type === 'layout-region') {
-      movePanel(e.active.data.current.panel as Panel, e.over.data.current.region as PanelRegion);
+    if (e.active.data.current?.type !== 'layout-tab') return;
+    const panel = e.active.data.current.panel as Panel;
+
+    if (e.over?.data.current?.type === 'layout-region') {
+      movePanel(panel, e.over.data.current.region as PanelRegion);
+      return;
+    }
+
+    // Dropped clear of every region. Dragging a tab onto a region already
+    // moves it there, so dropping it outside meaning "out of the window
+    // entirely" is the same gesture carried one step further, and there is no
+    // separate control to find. Panels that cannot be detached simply stay
+    // where they were, which is what dropping in nowhere used to do for all
+    // of them.
+    if (canDetach(panel)) {
+      detach(panel);
     }
   };
   const ActiveOverlayIcon = activeLayoutDragItem ? PANEL_ICONS[activeLayoutDragItem] : null;
+
   const effectiveLeftWidth = uiVisibility.leftPanel ? leftPanelWidth : 48;
   const effectiveRightWidth = uiVisibility.rightPanel ? rightPanelWidth : 48;
 
@@ -723,7 +802,7 @@ function App() {
         latestRenderedJobIdRef={latestRenderedJobIdRef}
         currentResRef={currentResRef}
       />
-      <ImageLoaderManager cachedEditStateRef={cachedEditStateRef} />
+      <ImageLoaderManager cachedEditStateRef={cachedEditStateRef} prevAdjustmentsRef={prevAdjustmentsRef} />
       <div
         className={clsx(
           'flex flex-col h-screen font-sans text-text-primary overflow-hidden select-none',
@@ -787,6 +866,7 @@ function App() {
                       compactEditorPanelCollapsedHeight={compactEditorPanelCollapsedHeight}
                       thumbnailAspectRatio={thumbnailAspectRatio}
                       sortedImageList={sortedImageList}
+                      stackInfo={stackInfo}
                       createResizeHandler={createResizeHandler}
                       handleBackToLibrary={handleBackToLibrary}
                       handleEditorContextMenu={handleEditorContextMenu}
@@ -813,6 +893,8 @@ function App() {
                   <LibraryView
                     sortedImageList={sortedImageList}
                     groupBadgeInfo={groupBadgeInfo}
+                    stackInfo={stackInfo}
+                    rawCompression={rawCompression}
                     thumbnailSize={thumbnailSize}
                     thumbnailAspectRatio={thumbnailAspectRatio}
                     libraryViewMode={libraryViewMode}

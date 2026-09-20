@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn drops_the_padding_a_camera_writes_after_the_packet() {
         let mut packet = b"<x:xmpmeta><xmp:Rating>1</xmp:Rating></x:xmpmeta>".to_vec();
-        packet.extend(std::iter::repeat(b' ').take(32_000));
+        packet.extend(std::iter::repeat_n(b' ', 32_000));
 
         let found = parse(&tiff_with_xmp(&packet));
         let text = found.xmp.expect("packet");

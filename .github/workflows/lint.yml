@@ -47,7 +47,7 @@ jobs:
 
       - name: Check formatting
         working-directory: src-tauri
-        run: cargo fmt -p RapidRAW -- --check
+        run: cargo fmt -p BlitzRaw -- --check
 
   clippy:
     name: cargo clippy

@@ -27,13 +27,13 @@ import {
   ImageFile,
   LibraryViewMode,
   Progress,
-  ThumbnailSize,
   ThumbnailAspectRatio,
   RawStatus,
   EditedStatus,
   LibraryDisplayMode,
 } from '../ui/AppProperties';
 import { GroupBadgeInfo, GroupId } from '../../utils/imageGrouping';
+import { StackInfo } from '../../utils/imageStacking';
 import { ImportState, Status } from '../ui/ExportImportProperties';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
@@ -58,6 +58,8 @@ interface MainLibraryProps {
   appSettings: AppSettings | null;
   currentFolderPath: string | null;
   groupBadgeInfo: Map<GroupId, GroupBadgeInfo> | null;
+  stackInfo: Map<string, StackInfo>;
+  rawCompression: Record<string, { label: string | null; needsConversion: boolean }>;
   imageList: Array<ImageFile>;
   imageRatings: Record<string, number>;
   importState: ImportState;
@@ -80,14 +82,14 @@ interface MainLibraryProps {
   onOpenFolder(): void;
   onSettingsChange(settings: AppSettings): Promise<void>;
   onThumbnailAspectRatioChange(aspectRatio: ThumbnailAspectRatio): void;
-  onThumbnailSizeChange(size: ThumbnailSize): void;
+  onThumbnailSizeChange(size: number): void;
   onRequestThumbnails?(paths: string[]): void;
   rootPaths: string[];
   setLibraryViewMode(mode: LibraryViewMode): void;
   theme: string;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   thumbnailProgress: Progress;
-  thumbnailSize: ThumbnailSize;
+  thumbnailSize: number;
   onNavigateToCommunity(): void;
 }
 
@@ -174,9 +176,6 @@ export default function MainLibrary(props: MainLibraryProps) {
   const [appVersion, setAppVersion] = useState('');
   const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
   const [latestVersion, setLatestVersion] = useState('');
-  const [isBusyDelayed, setIsBusyDelayed] = useState(false);
-  const [isBusyLoaderMounted, setIsBusyLoaderMounted] = useState(false);
-  const [isProgressHovered, setIsProgressHovered] = useState(false);
   const isSettingsOpen = useUIStore((state) => state.isSettingsOpen);
 
   const libraryDisplayMode = props.appSettings?.libraryDisplayMode || LibraryDisplayMode.Grid;
@@ -223,15 +222,6 @@ export default function MainLibrary(props: MainLibraryProps) {
     [t],
   );
 
-  const translatedThumbnailSizeOptions = useMemo(
-    () => [
-      { id: ThumbnailSize.Small, label: t('library.thumbnailSize.small'), size: 160 },
-      { id: ThumbnailSize.Medium, label: t('library.thumbnailSize.medium'), size: 240 },
-      { id: ThumbnailSize.Large, label: t('library.thumbnailSize.large'), size: 320 },
-    ],
-    [t],
-  );
-
   const translatedThumbnailAspectRatioOptions = useMemo(
     () => [
       { id: ThumbnailAspectRatio.Cover, label: t('library.thumbnailFit.fillSquare') },
@@ -255,29 +245,6 @@ export default function MainLibrary(props: MainLibraryProps) {
     [t],
   );
 
-  const isBusy =
-    props.isLoading ||
-    ((props.thumbnailProgress?.total ?? 0) > 0 &&
-      (props.thumbnailProgress?.current ?? 0) < (props.thumbnailProgress?.total ?? 0));
-
-  useEffect(() => {
-    let timer: number | undefined;
-
-    if (isBusy) {
-      timer = window.setTimeout(() => setIsBusyDelayed(true), 1000);
-    } else {
-      timer = window.setTimeout(() => setIsBusyDelayed(false), 500);
-    }
-
-    return () => clearTimeout(timer);
-  }, [isBusy]);
-
-  useEffect(() => {
-    if (isBusyDelayed) {
-      setIsBusyLoaderMounted(true);
-    }
-  }, [isBusyDelayed]);
-
   useEffect(() => {
     const compareVersions = (v1: string, v2: string) => {
       const parts1 = v1.split('.').map(Number);
@@ -297,7 +264,7 @@ export default function MainLibrary(props: MainLibraryProps) {
         const currentVersion = await getVersion();
         setAppVersion(currentVersion);
 
-        const response = await fetch('https://api.github.com/repos/CyberTimon/RapidRAW/releases/latest');
+        const response = await fetch('https://api.github.com/repos/Accent-Studio/BlitzRaw/releases/latest');
         if (!response.ok) {
           console.error('Failed to fetch latest release info from GitHub.');
           return;
@@ -393,13 +360,29 @@ export default function MainLibrary(props: MainLibraryProps) {
                     </Text>
                     <div className="flex flex-col w-full max-w-xs gap-4 relative z-10">
                       {hasLastPath && (
-                        <Button
-                          className="rounded-md h-11 w-full flex justify-center items-center shadow-md transition-transform duration-200 hover:scale-[1.01] active:scale-[.98]"
-                          onClick={props.onContinueSession}
-                          size="lg"
-                        >
-                          <RefreshCw size={20} className="mr-2" /> {t('library.splash.continueSession')}
-                        </Button>
+                        <>
+                          <Button
+                            className="rounded-md h-11 w-full flex justify-center items-center shadow-md transition-transform duration-200 hover:scale-[1.01] active:scale-[.98]"
+                            onClick={props.onContinueSession}
+                            size="lg"
+                          >
+                            <RefreshCw size={20} className="mr-2" /> {t('library.splash.continueSession')}
+                          </Button>
+                          <label className="flex items-center gap-2 -mt-2 cursor-pointer select-none text-text-secondary hover:text-text-primary transition-colors">
+                            <input
+                              type="checkbox"
+                              className="accent-accent w-4 h-4 cursor-pointer"
+                              checked={props.appSettings?.autoContinueSession ?? false}
+                              onChange={(e) =>
+                                props.onSettingsChange({
+                                  ...props.appSettings!,
+                                  autoContinueSession: e.target.checked,
+                                })
+                              }
+                            />
+                            <Text variant={TextVariants.small}>{t('library.splash.alwaysContinue')}</Text>
+                          </label>
+                        </>
                       )}
                       <div className="flex items-center gap-2">
                         <Button
@@ -456,7 +439,7 @@ export default function MainLibrary(props: MainLibraryProps) {
                             }`}
                             onClick={() => {
                               if (isUpdateAvailable) {
-                                open('https://github.com/CyberTimon/RapidRAW/releases/latest');
+                                open('https://github.com/Accent-Studio/BlitzRaw/releases/latest');
                               }
                             }}
                             data-tooltip={
@@ -509,11 +492,7 @@ export default function MainLibrary(props: MainLibraryProps) {
 
   return (
     <div className="flex-1 flex flex-col h-full min-w-0 bg-bg-secondary rounded-lg overflow-hidden">
-      <header
-        className="p-3 shrink-0 flex justify-between items-center border-b border-surface gap-4"
-        onMouseEnter={() => setIsProgressHovered(true)}
-        onMouseLeave={() => setIsProgressHovered(false)}
-      >
+      <header className="p-3 shrink-0 flex justify-between items-center border-b border-surface gap-4">
         <div className="min-w-0">
           <Text variant={TextVariants.headline}>{t('library.header.title')}</Text>
           {!props.isAndroid && (
@@ -523,29 +502,6 @@ export default function MainLibrary(props: MainLibraryProps) {
               ) : (
                 <p className="text-sm invisible select-none pointer-events-none h-5 overflow-hidden"></p>
               )}
-              <div
-                className={`flex items-center gap-2 overflow-hidden transition-all duration-300 whitespace-nowrap ${
-                  isBusyDelayed ? 'max-w-xs opacity-100' : 'max-w-0 opacity-0'
-                }`}
-                onTransitionEnd={(e) => {
-                  if (e.propertyName === 'opacity' && !isBusyDelayed) {
-                    setIsBusyLoaderMounted(false);
-                  }
-                }}
-              >
-                {isBusyLoaderMounted && <Loader2 size={14} className="animate-spin text-text-secondary shrink-0" />}
-                <div
-                  className={`flex items-center transition-all duration-300 ease-out overflow-hidden ${
-                    isProgressHovered && isBusyDelayed && (props.thumbnailProgress?.total ?? 0) > 0
-                      ? 'max-w-xs opacity-100'
-                      : 'max-w-0 opacity-0'
-                  }`}
-                >
-                  <Text variant={TextVariants.small} color={TextColors.secondary} className="whitespace-nowrap">
-                    ({props.thumbnailProgress?.current ?? 0}/{props.thumbnailProgress?.total ?? 0})
-                  </Text>
-                </div>
-              </div>
             </div>
           )}
         </div>
@@ -585,7 +541,6 @@ export default function MainLibrary(props: MainLibraryProps) {
               setLibraryViewMode={props.setLibraryViewMode}
               thumbnailSize={props.thumbnailSize}
               thumbnailAspectRatio={props.thumbnailAspectRatio}
-              thumbnailSizeOptions={translatedThumbnailSizeOptions}
               thumbnailAspectRatioOptions={translatedThumbnailAspectRatioOptions}
               ratingFilterOptions={translatedRatingFilterOptions}
               rawStatusOptions={translatedRawStatusOptions}
@@ -601,6 +556,13 @@ export default function MainLibrary(props: MainLibraryProps) {
                 <Users className="w-5 h-5" />
               </Button>
             )}
+            <Button
+              className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
+              onClick={() => setUI({ isSettingsOpen: true })}
+              data-tooltip={t('library.tooltips.appSettings')}
+            >
+              <Settings className="w-5 h-5" />
+            </Button>
             <Button
               className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
               onClick={props.onGoHome}
@@ -619,7 +581,6 @@ export default function MainLibrary(props: MainLibraryProps) {
           <LibraryGrid
             {...props}
             libraryDisplayMode={libraryDisplayMode}
-            thumbnailSizeOptions={translatedThumbnailSizeOptions}
           />
         )
       ) : props.isIndexing || props.aiModelDownloadStatus || props.importState.status === Status.Importing ? (

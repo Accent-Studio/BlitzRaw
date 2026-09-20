@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { ImageFile, Panel, UiVisibility, CullingSuggestions, PanelRegion } from '../components/ui/AppProperties';
+import { leftPanelOnArriving } from '../utils/panelLayout';
 
 export type SwitcherPlacement = 'bottom' | 'right' | 'left' | 'top';
 
@@ -12,6 +13,11 @@ export interface CollapsibleSectionsState {
 }
 
 export interface ConfirmModalState {
+  checkbox?: {
+    label: string;
+    checked: boolean;
+    onChange(checked: boolean): void;
+  };
   confirmText?: string;
   confirmVariant?: string;
   isOpen: boolean;
@@ -67,6 +73,35 @@ export interface CullingModalState {
   pathsToCull: Array<string>;
 }
 
+// ============ BLITZRAW: a tool is on when its own panel is on ============
+/**
+ * Whether a panel is the one its region is currently showing.
+ *
+ * The editor asks this to decide whether the crop, mask and AI tools are in
+ * use. It used to ask the single global `activePanel` instead, which is
+ * whatever `setActivePanel` was called with **last, for any region at all**.
+ *
+ * The two sidebars hold different things: history and the folder tree on the
+ * left, adjustments and crop and masks on the right. Both are on screen at
+ * once, so "the last panel activated anywhere" is not the same question as
+ * "which tool is in use", and the difference is invisible until two regions
+ * change in the same keystroke. Pressing R in the grid did exactly that: it
+ * opened the photo and asked for Crop, then arriving in the editor put History
+ * in the *left* column, which took the global with it. The Crop panel was still
+ * there on the right, plainly visible, and the tool it drives was off.
+ *
+ * Asking the regions cannot go wrong that way. It also gets the floating window
+ * right, where the global never did: a Crop panel dragged to the second screen
+ * is still the crop tool.
+ */
+export function isPanelShowing(
+  activePanels: Record<PanelRegion, Panel | null>,
+  panel: Panel,
+): boolean {
+  return Object.values(activePanels).some((shown) => shown === panel);
+}
+// ========== BLITZRAW END: a tool is on when its own panel is on ==========
+
 interface UIState {
   activeView: string;
   isFullScreen: boolean;
@@ -82,10 +117,26 @@ interface UIState {
   bottomPanelHeight: number;
   leftTopHeight: number;
   rightTopHeight: number;
+  /** The split inside the floating window, when it holds two regions. */
+  floatTopHeight: number;
   compactEditorPanelHeightOverride: number | null;
 
   panelLayout: Record<PanelRegion, Panel[]>;
   activePanels: Record<PanelRegion, Panel | null>;
+  /**
+   * Where each floating panel came from, so closing the window puts it back
+   * where it was rather than at the end of whichever region is first.
+   *
+   * The panels themselves are in `panelLayout.floatTop` and `floatBottom` like
+   * any others, and are saved with the workspace: the floating window comes
+   * back on the next start holding what it held. This list is the only part
+   * that is not saved, because a panel that has been floating since before a
+   * restart has no sidebar position worth remembering, and the default one is
+   * as good a guess as a stale one.
+   */
+  detachedPanels: Array<import('../utils/panelLayout').DetachedFrom>;
+  /** The scopes the floating window is showing, written as the backend reads them. */
+  detachedScopeChannels: Array<string> | null;
   activeLayoutDragItem: Panel | null;
   setLayoutDragItem: (panel: Panel | null) => void;
   movePanel: (panel: Panel, toRegion: PanelRegion) => void;
@@ -119,16 +170,45 @@ interface UIState {
   panoramaModalState: PanoramaModalState;
   hdrModalState: HdrModalState;
   negativeModalState: NegativeConversionModalState;
+  /** `mode` picks which detector runs; the dialog around it is the same. */
+  autoStackModalState: { isOpen: boolean; targetPaths: Array<string>; mode?: 'brackets' | 'bursts' };
+  /** True while a bulk HDR run owns the merge pipeline. The single-merge modal
+   *  is driven by backend events, so it must stand aside while a queue is using
+   *  the same events for its own progress. */
+  isBulkHdrRunning: boolean;
   denoiseModalState: DenoiseModalState;
   cullingModalState: CullingModalState;
   collageModalState: CollageModalState;
 
   setUI: (updater: Partial<UIState> | ((state: UIState) => Partial<UIState>)) => void;
   setPanel: (panel: Panel | null) => void;
+  /**
+   * BLITZRAW: put the left side on the panel this view arrives at.
+   *
+   * Called on arriving in a view and once after a saved workspace is applied,
+   * so opening the app in the grid does not land on the history of a photo you
+   * are no longer looking at. See LEFT_PANEL_FOR_VIEW in utils/panelLayout.ts.
+   */
+  showLeftPanelForView: (view: string) => void;
   customEscapeHandler: (() => void) | null;
   setCustomEscapeHandler: (handler: (() => void) | null) => void;
   searchFocusRequest: number;
   requestSearchFocus: () => void;
+}
+
+/**
+ * A layout with every region copied, whichever regions exist.
+ *
+ * `movePanel` used to build this by naming the four sidebar regions, so the two
+ * floating ones were dropped the first time anything was dragged: the panels in
+ * the floating window vanished from the layout, and the window with them.
+ */
+function copyLayout(layout: Record<PanelRegion, Panel[]>): Record<PanelRegion, Panel[]> {
+  const out = {} as Record<PanelRegion, Panel[]>;
+  for (const region of Object.keys(layout) as Array<PanelRegion>) {
+    out[region] = [...layout[region]];
+  }
+  return out;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -146,20 +226,38 @@ export const useUIStore = create<UIState>((set, get) => ({
   bottomPanelHeight: 144,
   leftTopHeight: 450,
   rightTopHeight: 450,
+  floatTopHeight: 400,
   compactEditorPanelHeightOverride: null,
 
   panelLayout: {
-    leftTop: [Panel.Metadata, Panel.FolderTree, Panel.Export],
+    leftTop: [Panel.Metadata, Panel.FolderTree, Panel.History, Panel.Export],
     leftBottom: [],
-    rightTop: [Panel.Adjustments, Panel.Crop, Panel.Masks, Panel.Ai, Panel.Presets],
+    // Both new panels start in the switcher beside the others, so they can be
+    // found. Dragging either into a bottom region is what gets them visible at
+    // the same time as the sliders, which is the arrangement they are for.
+    rightTop: [
+      Panel.Adjustments,
+      Panel.Crop,
+      Panel.Masks,
+      Panel.Ai,
+      Panel.Presets,
+      Panel.Scopes,
+      Panel.Navigator,
+    ],
     rightBottom: [],
+    floatTop: [],
+    floatBottom: [],
   },
   activePanels: {
     leftTop: Panel.FolderTree,
     leftBottom: null,
     rightTop: Panel.Adjustments,
     rightBottom: null,
+    floatTop: null,
+    floatBottom: null,
   },
+  detachedPanels: [],
+  detachedScopeChannels: null,
   activeLayoutDragItem: null,
 
   panelSwitcherPlacement: {
@@ -167,6 +265,8 @@ export const useUIStore = create<UIState>((set, get) => ({
     leftBottom: 'bottom',
     rightTop: 'right',
     rightBottom: 'right',
+    floatTop: 'bottom',
+    floatBottom: 'bottom',
   },
   setPanelSwitcherPlacement: (region, placement) =>
     set((state) => ({
@@ -176,7 +276,17 @@ export const useUIStore = create<UIState>((set, get) => ({
   activePanel: Panel.Adjustments,
   renderedPanel: Panel.Adjustments,
   slideDirection: 1,
-  collapsibleSectionsState: { basic: true, color: false, curves: true, details: false, effects: false },
+  // BLITZRAW: colorCorrection open by default, because it is the one every
+  // photo needs; the mixer and grading closed, because most photos do not.
+  collapsibleSectionsState: {
+    basic: true,
+    colorCorrection: true,
+    curves: true,
+    colorMixer: false,
+    color: false,
+    details: false,
+    effects: false,
+  },
 
   isCreateFolderModalOpen: false,
   isRenameFolderModalOpen: false,
@@ -210,6 +320,8 @@ export const useUIStore = create<UIState>((set, get) => ({
     stitchingSourcePaths: [],
   },
   negativeModalState: { isOpen: false, targetPaths: [] },
+  autoStackModalState: { isOpen: false, targetPaths: [], mode: 'brackets' },
+  isBulkHdrRunning: false,
   denoiseModalState: {
     isOpen: false,
     isProcessing: false,
@@ -228,12 +340,11 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   movePanel: (panel, toRegion) =>
     set((state) => {
-      const layout = {
-        leftTop: [...state.panelLayout.leftTop],
-        leftBottom: [...state.panelLayout.leftBottom],
-        rightTop: [...state.panelLayout.rightTop],
-        rightBottom: [...state.panelLayout.rightBottom],
-      };
+      // Copied from whatever regions there are rather than named one by one.
+      // Listing them meant that adding the two floating regions silently
+      // dropped them from the layout on the next drag, and the type checker
+      // was the only thing that noticed.
+      const layout = copyLayout(state.panelLayout);
       const active = { ...state.activePanels };
 
       let fromRegion: PanelRegion | null = null;
@@ -263,12 +374,11 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   movePanelToIndex: (panel, toRegion, index) =>
     set((state) => {
-      const layout = {
-        leftTop: [...state.panelLayout.leftTop],
-        leftBottom: [...state.panelLayout.leftBottom],
-        rightTop: [...state.panelLayout.rightTop],
-        rightBottom: [...state.panelLayout.rightBottom],
-      };
+      // Copied from whatever regions there are rather than named one by one.
+      // Listing them meant that adding the two floating regions silently
+      // dropped them from the layout on the next drag, and the type checker
+      // was the only thing that noticed.
+      const layout = copyLayout(state.panelLayout);
       const active = { ...state.activePanels };
 
       let fromRegion: PanelRegion | null = null;
@@ -305,6 +415,15 @@ export const useUIStore = create<UIState>((set, get) => ({
         renderedPanel: panel,
       };
       return updates;
+    }),
+
+  showLeftPanelForView: (view) =>
+    set((state) => {
+      const wanted = leftPanelOnArriving(state.panelLayout, view);
+      if (!wanted || state.activePanels[wanted.region] === wanted.panel) {
+        return state;
+      }
+      return { activePanels: { ...state.activePanels, [wanted.region]: wanted.panel } };
     }),
 
   setPanel: (panelId) => {

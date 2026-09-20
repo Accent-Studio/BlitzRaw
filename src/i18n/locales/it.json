@@ -61,6 +61,8 @@
       "tint": "Tinta",
       "toggleSliders": "Attiva/Disattiva Cursori",
       "vibrance": "Vividezza",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "Selettore Bilanciamento del Bianco",
       "wbPickerWgpuDisabled": "Selettore BB: Disabilita WGPU nelle Impostazioni.",
       "whiteBalance": "Bilanciamento del Bianco"

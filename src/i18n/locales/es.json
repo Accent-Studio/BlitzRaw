@@ -61,6 +61,8 @@
       "tint": "Matiz",
       "toggleSliders": "Alternar controles",
       "vibrance": "Intensidad",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "Selector de balance de blancos",
       "wbPickerWgpuDisabled": "Selector BB: Desactiva WGPU en los Ajustes.",
       "whiteBalance": "Balance de blancos"

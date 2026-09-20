@@ -961,11 +961,6 @@ mod hdr_dng_probe {
     use rawler::dng::{DNG_VERSION_V1_6, DngCompression};
     use rawler::tags::DngTag;
 
-
-
-
-
-
     /// The whole thing on a real merge: write it as we now write merges, then
     /// open it as the app will have to.
     #[test]
@@ -976,14 +971,23 @@ mod hdr_dng_probe {
         };
         let on_disk = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
-        let mut reader = ImageReader::open(&path).expect("open").with_guessed_format().expect("format");
+        let mut reader = ImageReader::open(&path)
+            .expect("open")
+            .with_guessed_format()
+            .expect("format");
         reader.no_limits();
         let original = reader.decode().expect("decode");
-        eprintln!("merge: {}x{}, {:.0} MB as the TIFF", original.width(), original.height(), on_disk as f64 / 1e6);
+        eprintln!(
+            "merge: {}x{}, {:.0} MB as the TIFF",
+            original.width(),
+            original.height(),
+            on_disk as f64 / 1e6
+        );
 
         let out = std::env::temp_dir().join("blitzraw-real-merge.dng");
         let start = std::time::Instant::now();
-        crate::hdr_dng::write_linear_jxl_dng(&out, &original, crate::hdr_dng::DEFAULT_DISTANCE).expect("write");
+        crate::hdr_dng::write_linear_jxl_dng(&out, &original, crate::hdr_dng::DEFAULT_DISTANCE)
+            .expect("write");
         let written = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
         eprintln!(
             "written in {:?} -> {:.1} MB, {:.0}x smaller",
@@ -995,9 +999,16 @@ mod hdr_dng_probe {
         let settings = AppSettings::default();
         let bytes = std::fs::read(&out).expect("read");
         let start = std::time::Instant::now();
-        let decoded = load_base_image_from_bytes(&bytes, &out.to_string_lossy(), false, &settings, None)
-            .expect("our loader should open what we wrote");
-        eprintln!("opened in {:?} -> {}x{} {:?}", start.elapsed(), decoded.width(), decoded.height(), decoded.color());
+        let decoded =
+            load_base_image_from_bytes(&bytes, &out.to_string_lossy(), false, &settings, None)
+                .expect("our loader should open what we wrote");
+        eprintln!(
+            "opened in {:?} -> {}x{} {:?}",
+            start.elapsed(),
+            decoded.width(),
+            decoded.height(),
+            decoded.color()
+        );
         assert_eq!(
             (decoded.width(), decoded.height()),
             (original.width(), original.height()),
@@ -1013,7 +1024,11 @@ mod hdr_dng_probe {
         // used to do to the screen.
         let to_srgb = |x: f32| -> f32 {
             let x = x.clamp(0.0, 1.0);
-            if x <= 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+            if x <= 0.0031308 {
+                x * 12.92
+            } else {
+                1.055 * x.powf(1.0 / 2.4) - 0.055
+            }
         };
         let a = original.to_rgb32f();
         let b = decoded.to_rgb32f();
@@ -1060,7 +1075,10 @@ mod hdr_dng_probe {
             eprintln!("RAPIDRAW_TEST_HDR_TIFF unset, skipping");
             return;
         };
-        let mut reader = ImageReader::open(&path).expect("open").with_guessed_format().expect("format");
+        let mut reader = ImageReader::open(&path)
+            .expect("open")
+            .with_guessed_format()
+            .expect("format");
         reader.no_limits();
         let merged = reader.decode().expect("decode");
         eprintln!("merged buffer: {}x{}", merged.width(), merged.height());
@@ -1072,10 +1090,12 @@ mod hdr_dng_probe {
         let to_rgb8 = start.elapsed();
         let start = std::time::Instant::now();
         let mut buf = std::io::Cursor::new(Vec::new());
-        rgb8.write_to(&mut buf, image::ImageFormat::Png).expect("png");
+        rgb8.write_to(&mut buf, image::ImageFormat::Png)
+            .expect("png");
         let png = start.elapsed();
         let start = std::time::Instant::now();
-        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf.get_ref());
+        let encoded =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf.get_ref());
         let b64 = start.elapsed();
         eprintln!(
             "preview: to_rgb8 {to_rgb8:?} + png {png:?} ({:.0} MB) + base64 {b64:?} ({:.0} MB of payload)",
@@ -1109,7 +1129,10 @@ mod hdr_dng_probe {
         // rest of that work replaces two decodes of the file just written.
         let start = std::time::Instant::now();
         let linear = crate::hdr_dng::as_decoded(merged.clone(), std::path::Path::new("a.dng"));
-        eprintln!("merge into the space a decode gives back: {:?}", start.elapsed());
+        eprintln!(
+            "merge into the space a decode gives back: {:?}",
+            start.elapsed()
+        );
         drop(linear);
 
         // Whether the thumbnail is worth building from the 16-bit buffer the
@@ -1183,7 +1206,11 @@ mod hdr_dng_probe {
         // The one that matters. Wrapped, because the loader's other fallback
         // path exists for a decoder that panics rather than returns.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            decoder.raw_image(&source, &rawler::decoders::RawDecodeParams::default(), false)
+            decoder.raw_image(
+                &source,
+                &rawler::decoders::RawDecodeParams::default(),
+                false,
+            )
         }));
         match result {
             Ok(Ok(raw)) => {
@@ -1191,8 +1218,14 @@ mod hdr_dng_probe {
                     "3. raw_image: ok -> {}x{}, cpp {}, bps {}",
                     raw.width, raw.height, raw.cpp, raw.bps
                 );
-                eprintln!("   whitelevel {:?}  blacklevel {:?}", raw.whitelevel, raw.blacklevel);
-                eprintln!("   crop_area {:?}  active_area {:?}", raw.crop_area, raw.active_area);
+                eprintln!(
+                    "   whitelevel {:?}  blacklevel {:?}",
+                    raw.whitelevel, raw.blacklevel
+                );
+                eprintln!(
+                    "   crop_area {:?}  active_area {:?}",
+                    raw.crop_area, raw.active_area
+                );
             }
             Ok(Err(e)) => eprintln!("3. raw_image FAILED: {e:?}"),
             Err(_) => eprintln!("3. raw_image PANICKED"),
@@ -1201,7 +1234,12 @@ mod hdr_dng_probe {
         // And the whole of our own path, for the record.
         let settings = AppSettings::default();
         match load_base_image_from_bytes(&bytes, &path, false, &settings, None) {
-            Ok(img) => eprintln!("4. our loader: {}x{} ({:?})", img.width(), img.height(), img.color()),
+            Ok(img) => eprintln!(
+                "4. our loader: {}x{} ({:?})",
+                img.width(),
+                img.height(),
+                img.color()
+            ),
             Err(e) => eprintln!("4. our loader FAILED: {e}"),
         }
     }
@@ -1248,9 +1286,12 @@ mod hdr_dng_probe {
         drop(rgb16);
 
         for distance in [0.1f32, 0.15, 0.25] {
-            let encoded = match jxl_encoder::LossyConfig::new(distance)
-                .encode(&pixels, w, h, jxl_encoder::PixelLayout::Rgb16)
-            {
+            let encoded = match jxl_encoder::LossyConfig::new(distance).encode(
+                &pixels,
+                w,
+                h,
+                jxl_encoder::PixelLayout::Rgb16,
+            ) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("distance {distance}: encode failed: {e}");
@@ -1333,11 +1374,15 @@ mod hdr_dng_probe {
         let curved_bytes: Vec<u8> = bytemuck::cast_slice(curved.as_slice()).to_vec();
         drop(curved);
 
-        for (stored_curve, distance) in [(false, 0.1f32), (false, 0.25), (false, 0.5), (false, 1.0)] {
+        for (stored_curve, distance) in [(false, 0.1f32), (false, 0.25), (false, 0.5), (false, 1.0)]
+        {
             let source = if stored_curve { &curved_bytes } else { &pixels };
-            let encoded = match jxl_encoder::LossyConfig::new(distance)
-                .encode(source, w, h, jxl_encoder::PixelLayout::Rgb16)
-            {
+            let encoded = match jxl_encoder::LossyConfig::new(distance).encode(
+                source,
+                w,
+                h,
+                jxl_encoder::PixelLayout::Rgb16,
+            ) {
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("distance {distance}: encode failed: {e}");
@@ -1412,7 +1457,11 @@ mod hdr_dng_probe {
             let n = original.len() as f64;
             eprintln!(
                 "{} distance {distance}: {:.1} MB  |  in display units out of 255: rms {:.3}, worst {:.1}, worst in shadows {:.1}",
-                if stored_curve { "curve-stored" } else { "linear-stored" },
+                if stored_curve {
+                    "curve-stored"
+                } else {
+                    "linear-stored"
+                },
                 encoded.len() as f64 / 1e6,
                 (sum_sq / n).sqrt(),
                 worst,
@@ -1458,7 +1507,10 @@ mod hdr_dng_probe {
                 img.height(),
                 img.color()
             ),
-            Err(e) => eprintln!("  our loader CANNOT open it after {:?}: {e}", start.elapsed()),
+            Err(e) => eprintln!(
+                "  our loader CANNOT open it after {:?}: {e}",
+                start.elapsed()
+            ),
         }
     }
 
@@ -1497,20 +1549,37 @@ mod hdr_dng_probe {
         for distance in [0.0f32, 0.5, 1.0, 2.0] {
             let start = std::time::Instant::now();
             let encoded = if distance == 0.0 {
-                jxl_encoder::LosslessConfig::new().encode(&pixels, w, h, jxl_encoder::PixelLayout::Rgb16)
+                jxl_encoder::LosslessConfig::new().encode(
+                    &pixels,
+                    w,
+                    h,
+                    jxl_encoder::PixelLayout::Rgb16,
+                )
             } else {
-                jxl_encoder::LossyConfig::new(distance).encode(&pixels, w, h, jxl_encoder::PixelLayout::Rgb16)
+                jxl_encoder::LossyConfig::new(distance).encode(
+                    &pixels,
+                    w,
+                    h,
+                    jxl_encoder::PixelLayout::Rgb16,
+                )
             };
             match encoded {
                 Ok(data) => eprintln!(
                     "  jxl {}: {:?} -> {:.1} MB, {:.1}x smaller than the TIFF, {:.3} bytes per sample",
-                    if distance == 0.0 { "lossless".to_string() } else { format!("distance {distance}") },
+                    if distance == 0.0 {
+                        "lossless".to_string()
+                    } else {
+                        format!("distance {distance}")
+                    },
                     start.elapsed(),
                     data.len() as f64 / 1e6,
                     on_disk as f64 / data.len().max(1) as f64,
                     data.len() as f64 / (w as f64 * h as f64 * 3.0),
                 ),
-                Err(e) => eprintln!("  jxl distance {distance}: failed after {:?}: {e}", start.elapsed()),
+                Err(e) => eprintln!(
+                    "  jxl distance {distance}: failed after {:?}: {e}",
+                    start.elapsed()
+                ),
             }
         }
     }
@@ -1529,7 +1598,11 @@ mod hdr_dng_probe {
             return;
         };
         let on_disk = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        eprintln!("input: {} ({:.0} MB as an uncompressed 32-bit float TIFF)", path, on_disk as f64 / 1e6);
+        eprintln!(
+            "input: {} ({:.0} MB as an uncompressed 32-bit float TIFF)",
+            path,
+            on_disk as f64 / 1e6
+        );
 
         // The same no_limits the loader uses: the image crate refuses a
         // half gigabyte allocation by default, which is most of the point.
@@ -1540,7 +1613,13 @@ mod hdr_dng_probe {
             .expect("guess the format");
         reader.no_limits();
         let img = reader.decode().expect("decode the merge");
-        eprintln!("read back: {:?} -> {}x{} {:?}", start.elapsed(), img.width(), img.height(), img.color());
+        eprintln!(
+            "read back: {:?} -> {}x{} {:?}",
+            start.elapsed(),
+            img.width(),
+            img.height(),
+            img.color()
+        );
 
         // The merge is histogram-stretched to 0..1 before it is written, so
         // sixteen bits across that range is the same picture. This is the step
@@ -1559,7 +1638,8 @@ mod hdr_dng_probe {
             ("lossless p1", DngCompression::Lossless, 1u8),
             ("lossless p2", DngCompression::Lossless, 2u8),
         ] {
-            let out = std::env::temp_dir().join(format!("blitzraw-probe-{}.dng", name.replace(' ', "-")));
+            let out =
+                std::env::temp_dir().join(format!("blitzraw-probe-{}.dng", name.replace(' ', "-")));
             let start = std::time::Instant::now();
             {
                 let file = std::fs::File::create(&out).expect("create");
@@ -1571,7 +1651,9 @@ mod hdr_dng_probe {
                         .rgb_image_u16(rgb16.as_raw().as_slice(), w, h, compression, predictor)
                         .expect("write pixels");
                     frame.ifd_mut().add_tag(DngTag::BlackLevel, [0u16, 0, 0]);
-                    frame.ifd_mut().add_tag(DngTag::WhiteLevel, [u16::MAX, u16::MAX, u16::MAX]);
+                    frame
+                        .ifd_mut()
+                        .add_tag(DngTag::WhiteLevel, [u16::MAX, u16::MAX, u16::MAX]);
                     frame.finalize().expect("finalize");
                 }
                 dng.close().expect("close");
@@ -1589,7 +1671,8 @@ mod hdr_dng_probe {
             let settings = AppSettings::default();
             let bytes = std::fs::read(&out).expect("read back");
             let start = std::time::Instant::now();
-            match load_base_image_from_bytes(&bytes, &out.to_string_lossy(), false, &settings, None) {
+            match load_base_image_from_bytes(&bytes, &out.to_string_lossy(), false, &settings, None)
+            {
                 Ok(decoded) => eprintln!(
                     "dng {name}: reads back in {:?} -> {}x{} {:?}",
                     start.elapsed(),
@@ -1597,7 +1680,10 @@ mod hdr_dng_probe {
                     decoded.height(),
                     decoded.color()
                 ),
-                Err(e) => eprintln!("dng {name}: WILL NOT READ BACK after {:?}: {e}", start.elapsed()),
+                Err(e) => eprintln!(
+                    "dng {name}: WILL NOT READ BACK after {:?}: {e}",
+                    start.elapsed()
+                ),
             }
             let _ = std::fs::remove_file(&out);
         }
@@ -1622,10 +1708,15 @@ mod preview_cost_tests {
         };
         let settings = AppSettings::default();
         let bytes = std::fs::read(&path).expect("read test file");
-        eprintln!("file: {} ({:.1} MB on disk)", path, bytes.len() as f64 / 1e6);
+        eprintln!(
+            "file: {} ({:.1} MB on disk)",
+            path,
+            bytes.len() as f64 / 1e6
+        );
 
         let start = std::time::Instant::now();
-        let full = load_base_image_from_bytes(&bytes, &path, false, &settings, None).expect("decode");
+        let full =
+            load_base_image_from_bytes(&bytes, &path, false, &settings, None).expect("decode");
         let decode = start.elapsed();
         let (w, h) = full.dimensions();
         let bytes_per_px: usize = match &full {
@@ -1643,7 +1734,12 @@ mod preview_cost_tests {
         let start = std::time::Instant::now();
         let fast = load_base_image_from_bytes(&bytes, &path, true, &settings, None);
         match &fast {
-            Ok(img) => eprintln!("fast decode: {:?} -> {}x{}", start.elapsed(), img.width(), img.height()),
+            Ok(img) => eprintln!(
+                "fast decode: {:?} -> {}x{}",
+                start.elapsed(),
+                img.width(),
+                img.height()
+            ),
             Err(e) => eprintln!("fast decode failed after {:?}: {e}", start.elapsed()),
         }
 
@@ -1798,7 +1894,11 @@ mod patch_scale_tests {
         for scale in [0.0, -1.0, 4.0, f32::NAN] {
             let out = composite_patches_on_image_scaled(&black_canvas(100), &adjustments, scale)
                 .expect("composite");
-            assert_eq!(painted_bounds(&out), Some((40, 40, 59, 59)), "scale {scale}");
+            assert_eq!(
+                painted_bounds(&out),
+                Some((40, 40, 59, 59)),
+                "scale {scale}"
+            );
         }
     }
 

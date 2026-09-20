@@ -17,9 +17,9 @@ use std::path::Path;
 
 /// Suffixes belonging to catalog sidecar trees, matched case-insensitively.
 const IGNORED_SUFFIXES: &[&str] = &[
-    ".lrdata",      // Lightroom previews and smart previews
-    ".lrcat-data",  // Lightroom catalog support data
-    ".cosessiondb", // Capture One session database
+    ".lrdata",        // Lightroom previews and smart previews
+    ".lrcat-data",    // Lightroom catalog support data
+    ".cosessiondb",   // Capture One session database
     ".photoslibrary", // Apple Photos package
 ];
 
@@ -29,8 +29,8 @@ const IGNORED_NAMES: &[&str] = &[
     "System Volume Information",
     ".git",
     ".Trashes",
-    "#recycle", // Synology NAS
-    "@eaDir",   // Synology NAS thumbnail store
+    "#recycle",           // Synology NAS
+    "@eaDir",             // Synology NAS thumbnail store
     ".blitzraw-previews", // our own rendered previews, see preview_cache
     ".darkroom-previews", // and what those were called before the rename
 ];

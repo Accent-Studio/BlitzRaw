@@ -809,7 +809,14 @@ pub fn resolve_lens_params(
 mod blitzraw_distortion_tests {
     use super::*;
 
-    fn dist(model: &str, focal: f32, k1: Option<f32>, a: Option<f32>, b: Option<f32>, c: Option<f32>) -> Distortion {
+    fn dist(
+        model: &str,
+        focal: f32,
+        k1: Option<f32>,
+        a: Option<f32>,
+        b: Option<f32>,
+        c: Option<f32>,
+    ) -> Distortion {
         Distortion {
             model: model.to_string(),
             focal,
@@ -846,7 +853,12 @@ mod blitzraw_distortion_tests {
         // same way. poly3 read as poly5 does not do this, which is how the
         // fault was found.
         let ptlens = extract_dist_params(&dist(
-            "ptlens", 24.0, None, Some(0.03963), Some(-0.12592), Some(0.08209),
+            "ptlens",
+            24.0,
+            None,
+            Some(0.03963),
+            Some(-0.12592),
+            Some(0.08209),
         ));
         let poly3 = extract_dist_params(&dist("poly3", 70.0, Some(-0.00849), None, None, None));
 
@@ -906,7 +918,12 @@ mod blitzraw_distortion_tests {
         // get no correction at all. On a 14mm that is plainly wrong: an
         // ultra-wide's barrel is worst in the corners, not in the middle.
         let params = extract_dist_params(&dist(
-            "ptlens", 14.0, None, Some(0.0076), Some(-0.0551), Some(0.0113),
+            "ptlens",
+            14.0,
+            None,
+            Some(0.0076),
+            Some(-0.0551),
+            Some(0.0113),
         ));
         let corner = 1.8027_f64; // half diagonal over half short side, 3:2
 
@@ -949,7 +966,12 @@ mod blitzraw_distortion_tests {
         // 250%, as it was, this came out near five percent, which is what made
         // straight lines near the edge bow the wrong way.
         let params = extract_dist_params(&dist(
-            "ptlens", 24.0, None, Some(0.03963), Some(-0.12592), Some(0.08209),
+            "ptlens",
+            24.0,
+            None,
+            Some(0.03963),
+            Some(-0.12592),
+            Some(0.08209),
         ));
         let ru = 0.5_f64;
         let moved = (radius_out(params, ru) - ru) / ru;

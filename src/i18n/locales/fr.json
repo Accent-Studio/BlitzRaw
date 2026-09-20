@@ -61,6 +61,8 @@
       "tint": "Teinte",
       "toggleSliders": "Basculer les curseurs",
       "vibrance": "Vibrance",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "Pipette de balance des blancs",
       "wbPickerWgpuDisabled": "Pipette BB : Désactivez WGPU dans les paramètres.",
       "whiteBalance": "Balance des blancs"

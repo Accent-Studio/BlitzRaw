@@ -211,7 +211,10 @@ pub fn fit_place_to_area(
 }
 
 fn place_path(app_handle: &AppHandle) -> Option<PathBuf> {
-    Some(crate::data_dir::data_path(app_handle, "panel_window_state.json"))
+    Some(crate::data_dir::data_path(
+        app_handle,
+        "panel_window_state.json",
+    ))
 }
 
 fn remembered_place(app_handle: &AppHandle) -> Option<PanelWindowPlace> {
@@ -622,6 +625,10 @@ pub async fn open_floating_window(app_handle: AppHandle) -> Result<(), String> {
 
     // Where it was left last time, if that is still a sensible place.
     let place = remembered_place(&app_handle);
+    // Only Windows reassigns this, to give the panel window an owner. Everywhere
+    // else the builder is used exactly as it is made, so the `mut` reads as
+    // unused and the build fails on warnings.
+    #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(&app_handle, FLOATING_LABEL, url)
         .title("BlitzRaw Panels")
         .inner_size(420.0, 760.0)
@@ -728,7 +735,10 @@ pub async fn open_floating_window(app_handle: AppHandle) -> Result<(), String> {
             // and knows where it is better than anything tracking it would.
             remember_place(&closing, &closing_window);
         }
-        if matches!(event, WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed) {
+        if matches!(
+            event,
+            WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+        ) {
             if SHUTTING_DOWN.load(Ordering::SeqCst) {
                 // The application is closing, not the window. Saying otherwise
                 // here would dismantle the arrangement and save that, so the
@@ -736,7 +746,11 @@ pub async fn open_floating_window(app_handle: AppHandle) -> Result<(), String> {
                 return;
             }
             log::info!("The floating panel window is closing");
-            crate::resilient_emit::emit_to_every_window(&closing, "panel-window-closed", serde_json::json!({}));
+            crate::resilient_emit::emit_to_every_window(
+                &closing,
+                "panel-window-closed",
+                serde_json::json!({}),
+            );
         }
     });
 
@@ -755,7 +769,12 @@ pub async fn open_floating_window(app_handle: AppHandle) -> Result<(), String> {
             .or_else(|| window.primary_monitor().ok().flatten())
             .map(|monitor| {
                 let work = monitor.work_area();
-                (work.position.x, work.position.y, work.size.width, work.size.height)
+                (
+                    work.position.x,
+                    work.position.y,
+                    work.size.width,
+                    work.size.height,
+                )
             });
 
         let fitted = match area {
@@ -834,7 +853,10 @@ mod tests {
         // The future is only constructed here, never polled. Constructing it
         // does nothing at all, which is exactly what makes this a compile-time
         // check and not a window opening during `cargo test`.
-        fn only_takes_a_future<F: std::future::Future<Output = Result<(), String>>>(_: fn(AppHandle) -> F) {}
+        fn only_takes_a_future<F: std::future::Future<Output = Result<(), String>>>(
+            _: fn(AppHandle) -> F,
+        ) {
+        }
         only_takes_a_future(open_floating_window);
     }
 
@@ -898,7 +920,11 @@ mod tests {
         let fitted = fit_place_to_area(from_the_tall_screen, -2560, 0, 2560, 1400);
 
         assert_eq!(fitted.height, 1400);
-        assert_eq!(fitted.x + fitted.width as i32, 0, "still docked right: {fitted:?}");
+        assert_eq!(
+            fitted.x + fitted.width as i32,
+            0,
+            "still docked right: {fitted:?}"
+        );
         assert!(fitted.y >= 0, "top edge above the work area: {fitted:?}");
     }
 
@@ -938,8 +964,15 @@ mod tests {
 
         assert_eq!(fitted.x + fitted.width as i32, 0, "right edge: {fitted:?}");
         assert_eq!(fitted.y, 0, "top edge: {fitted:?}");
-        assert_eq!(fitted.y + fitted.height as i32, 2097, "bottom edge: {fitted:?}");
-        assert_eq!(fitted.x, -781, "the left edge is where it was put: {fitted:?}");
+        assert_eq!(
+            fitted.y + fitted.height as i32,
+            2097,
+            "bottom edge: {fitted:?}"
+        );
+        assert_eq!(
+            fitted.x, -781,
+            "the left edge is where it was put: {fitted:?}"
+        );
     }
 
     #[test]
@@ -951,7 +984,10 @@ mod tests {
         let fitted = fit_place_to_area(docked_right, -3840, 0, 3840, 2097);
 
         assert_eq!(fitted.x, -810, "the left edge did not move");
-        assert_eq!(fitted.width, 810, "and the width grew by the ten it was out");
+        assert_eq!(
+            fitted.width, 810,
+            "and the width grew by the ten it was out"
+        );
     }
 
     #[test]
@@ -973,7 +1009,10 @@ mod tests {
 
         let first_request = wanted;
         let first_actual = first_request + frame;
-        assert_ne!(first_actual, wanted, "the frame is what makes this necessary");
+        assert_ne!(
+            first_actual, wanted,
+            "the frame is what makes this necessary"
+        );
 
         let second_request = corrected(first_request, wanted, first_actual);
         let second_actual = second_request + frame;

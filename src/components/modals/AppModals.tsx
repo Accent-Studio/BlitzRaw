@@ -18,8 +18,9 @@ import RenameFileModal from './RenameFileModal';
 import ConfirmModal from './ConfirmModal';
 import ImportSettingsModal from './ImportSettingsModal';
 import CullingModal from './CullingModal';
+import AutoStackModal from './AutoStackModal';
 import CollageModal from './CollageModal';
-import { AppSettings, Invokes, AlbumItem, Album, AlbumGroup } from '../ui/AppProperties';
+import { AppSettings, Invokes, AlbumItem, Album, AlbumGroup, DenoiseMethod } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
 
 export interface AppModalsProps {
@@ -29,8 +30,8 @@ export interface AppModalsProps {
   handleSaveHdr: () => Promise<string>;
   handleStartHdr: (paths: string[]) => void;
   refreshImageList: () => Promise<void>;
-  handleApplyDenoise: (intensity: number, method: 'ai' | 'bm3d') => Promise<void>;
-  handleBatchDenoise: (intensity: number, method: 'ai' | 'bm3d', paths: string[]) => Promise<string[]>;
+  handleApplyDenoise: (intensity: number, method: DenoiseMethod) => Promise<void>;
+  handleBatchDenoise: (intensity: number, method: DenoiseMethod, paths: string[]) => Promise<string[]>;
   handleSaveDenoisedImage: () => Promise<string>;
   handleCreateFolder: (folderName: string) => Promise<void>;
   handleRenameFolder: (newName: string) => Promise<void>;
@@ -70,6 +71,7 @@ export default function AppModals(props: AppModalsProps) {
     panoramaModalState,
     hdrModalState,
     negativeModalState,
+    autoStackModalState,
     denoiseModalState,
     cullingModalState,
     collageModalState,
@@ -92,6 +94,7 @@ export default function AppModals(props: AppModalsProps) {
       panoramaModalState: state.panoramaModalState,
       hdrModalState: state.hdrModalState,
       negativeModalState: state.negativeModalState,
+      autoStackModalState: state.autoStackModalState,
       denoiseModalState: state.denoiseModalState,
       cullingModalState: state.cullingModalState,
       collageModalState: state.collageModalState,
@@ -216,6 +219,31 @@ export default function AppModals(props: AppModalsProps) {
               props.handleImageSelect(savedPaths[0]);
             }
           });
+        }}
+      />
+      <AutoStackModal
+        isOpen={autoStackModalState.isOpen}
+        targetPaths={autoStackModalState.targetPaths}
+        mode={autoStackModalState.mode}
+        onClose={() => setUI((state) => ({ autoStackModalState: { ...state.autoStackModalState, isOpen: false } }))}
+        onApply={async (stacks) => {
+          try {
+            const summary = await invoke<{ stacksWritten: number; framesStacked: number }>('set_stacks', {
+              stacks: stacks.map((stack) => stack.paths),
+            });
+            await props.refreshImageList();
+            // Both detectors write stacks the same way; only the word changes.
+            toast.success(
+              t(
+                autoStackModalState.mode === 'bursts'
+                  ? 'notifications.burstsCreated'
+                  : 'modals.autoStack.created',
+                { stacks: summary.stacksWritten, frames: summary.framesStacked },
+              ),
+            );
+          } catch (err) {
+            toast.error(`${err}`);
+          }
         }}
       />
       <DenoiseModal

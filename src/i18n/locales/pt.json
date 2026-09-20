@@ -61,6 +61,8 @@
       "tint": "Tonalidade",
       "toggleSliders": "Alternar Controles",
       "vibrance": "Vibração",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "Seletor de Balanço de Branco",
       "wbPickerWgpuDisabled": "Seletor de BB: Desative o WGPU nas Configurações.",
       "whiteBalance": "Balanço de Branco"

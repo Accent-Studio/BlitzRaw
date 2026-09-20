@@ -224,9 +224,7 @@ pub async fn convert_to_dng(
     app_handle: AppHandle,
 ) -> Result<ConversionSummary, String> {
     let Some(converter) = locate_converter() else {
-        return Err(
-            "Adobe DNG Converter was not found. Install it, then try again.".to_string(),
-        );
+        return Err("Adobe DNG Converter was not found. Install it, then try again.".to_string());
     };
 
     let total = paths.len();

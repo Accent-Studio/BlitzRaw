@@ -1,12 +1,27 @@
-import { useState, useEffect, useRef } from 'react';
-import { Star, Copy, ClipboardPaste, Check, Settings, Filter, PanelLeft, PanelBottom, PanelRight } from 'lucide-react';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import {
+  Star,
+  Copy,
+  ClipboardPaste,
+  Check,
+  Layers,
+  Settings,
+  Filter,
+  PanelLeft,
+  PanelBottom,
+  PanelRight,
+} from 'lucide-react';
 import clsx from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
+import { currentSelectionSummary } from '../../utils/selection';
 import { useTranslation } from 'react-i18next';
 
 import Filmstrip from './Filmstrip';
+import BusyIndicator from '../ui/BusyIndicator';
 import { GLOBAL_KEYS, ImageFile, SelectedImage, ThumbnailAspectRatio } from '../ui/AppProperties';
+import { StackInfo } from '../../utils/imageStacking';
+import { useStackToggle } from '../../hooks/useStackToggle';
 import Text from '../ui/Text';
 import { useEditorStore } from '../../store/useEditorStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
@@ -30,6 +45,8 @@ interface BottomBarProps {
   isResetDisabled?: boolean;
   isResizing?: boolean;
   multiSelectedPaths?: Array<string>;
+  /** The stacks in `imageList`, for the strip's badges and the open-all button. */
+  stackInfo?: Map<string, StackInfo>;
   onClearSelection?(): void;
   onContextMenu?(event: any, path: string): void;
   onEmptyAreaContextMenu?(event: any): void;
@@ -49,50 +66,12 @@ interface BottomBarProps {
   showZoomControls?: boolean;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   totalImages?: number;
+  /**
+   * BLITZRAW: how many of `totalImages` survive the current filter and are
+   * actually on screen. Absent means nothing is being hidden.
+   */
+  visibleImages?: number;
 }
-
-interface StarRatingProps {
-  disabled: boolean;
-  onRate(rate: number): void;
-  rating: number;
-}
-
-const StarRating = ({ rating, onRate, disabled }: StarRatingProps) => {
-  const { t } = useTranslation();
-
-  return (
-    <div className={clsx('flex items-center gap-1', disabled && 'cursor-not-allowed')}>
-      {[...Array(5)].map((_, index: number) => {
-        const starValue = index + 1;
-        return (
-          <button
-            className="disabled:cursor-not-allowed"
-            disabled={disabled}
-            key={starValue}
-            onClick={() => !disabled && onRate(starValue === rating ? 0 : starValue)}
-            data-tooltip={
-              disabled
-                ? t('ui.bottomBar.tooltips.selectToRate')
-                : t('ui.bottomBar.tooltips.rateStars', { count: starValue })
-            }
-          >
-            <Star
-              size={18}
-              className={clsx(
-                'transition-colors duration-150',
-                disabled
-                  ? 'text-text-secondary opacity-40'
-                  : starValue <= rating
-                    ? 'fill-accent text-accent'
-                    : 'text-text-secondary hover:text-accent',
-              )}
-            />
-          </button>
-        );
-      })}
-    </div>
-  );
-};
 
 interface PanelToggleButtonProps {
   onClick: () => void;
@@ -144,13 +123,17 @@ export default function BottomBar({
   onZoomChange = () => {},
   rating,
   selectedImage,
+  stackInfo,
   setIsFilmstripVisible,
   showFilmstrip = true,
   showZoomControls = true,
   thumbnailAspectRatio,
   totalImages,
+  visibleImages,
 }: BottomBarProps) {
   const { t } = useTranslation();
+  const expandedStacks = useLibraryStore((state) => state.expandedStacks);
+  const { toggleAllStacks } = useStackToggle();
 
   const { isInstantTransition, uiVisibility, setUI } = useUIStore(
     useShallow((state) => ({
@@ -212,9 +195,42 @@ export default function BottomBar({
 
   const numSelected = multiSelectedPaths.length;
   const total = totalImages ?? 0;
-  const showSelectionCounter = numSelected > 1;
 
-  const [isFilterExpanded, setIsFilterExpanded] = useState(false);
+  // A collapsed stack counts as one click and several files, and which of those
+  // two numbers matters depends on what you are about to do. Both are reported:
+  // what was picked reads first, because that is what was picked and a selection
+  // of eight stacks is eight things rather than thirty, and the file count
+  // follows it, because deleting a collapsed stack takes the whole bracket and a
+  // bracket quietly reading as one file is how three get deleted by accident.
+  const selectionSummary = useMemo(
+    () => currentSelectionSummary(multiSelectedPaths),
+    [multiSelectedPaths],
+  );
+
+  // Opening every stack at once, for a strip or a grid full of them. One button
+  // rather than two: with anything still closed it opens, otherwise it closes,
+  // which is the same gesture the badge on a single stack already has.
+  const stackIds = useMemo(() => [...(stackInfo?.keys() ?? [])], [stackInfo]);
+  const anyStackClosed = useMemo(
+    () => stackIds.some((id) => !expandedStacks.includes(id)),
+    [stackIds, expandedStacks],
+  );
+
+
+  const showSelectionCounter = selectionSummary.files > 1;
+
+  // How much of the folder is on screen: tiles drawn against files found. The
+  // two differ for a filter and also for a closed stack, which is one tile over
+  // several files, and both are reasons to say so. Equal means nothing is being
+  // held back, and the bar gives the size of the folder on its own rather than
+  // the same number twice.
+  const shown = visibleImages ?? total;
+  const isFiltered = shown < total;
+
+  // BLITZRAW: open. The star and colour filters are the first thing reached for
+  // on a card of a thousand frames, and a click to reveal them every session is
+  // a click for nothing. The button still closes them.
+  const [isFilterExpanded, setIsFilterExpanded] = useState(true);
   const { filterCriteria, setFilterCriteria } = useLibraryStore(
     useShallow((state) => ({
       filterCriteria: state.filterCriteria,
@@ -349,6 +365,7 @@ export default function BottomBar({
               onImageSelect={onImageSelect}
               onRequestThumbnails={onRequestThumbnails}
               selectedImage={selectedImage}
+              stackInfo={stackInfo}
               thumbnailAspectRatio={thumbnailAspectRatio}
             />
           </div>
@@ -357,14 +374,22 @@ export default function BottomBar({
 
       <div
         className={clsx(
-          'shrink-0 h-12 flex items-center justify-between px-3',
+          'shrink-0 h-12 flex items-center justify-between px-3 relative',
           !isLibraryView && 'border-t transition-colors duration-300',
           !isLibraryView && showFilmstrip && isFilmstripVisible ? 'border-surface' : 'border-transparent',
         )}
       >
+        {/* Out of the flow on purpose: the selection counter to the left grows
+            and shrinks, and neither side should shift when work starts. */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex justify-center pointer-events-none">
+          <BusyIndicator />
+        </div>
+
         <div className="flex items-center gap-4">
-          <StarRating rating={rating} onRate={onRate} disabled={isRatingDisabled} />
-          <div className="h-5 w-px bg-surface"></div>
+          {/* BLITZRAW: the five-star rating widget used to open this bar. It is
+              gone. Rating is done with the number keys and read off the tile,
+              so a second place to click it earned nothing and took the corner
+              the eye lands on first. */}
           <div className="flex items-center gap-2">
             <button
               className="relative w-8 h-8 flex items-center justify-center rounded-md text-text-secondary hover:bg-surface hover:text-text-primary transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
@@ -532,15 +557,61 @@ export default function BottomBar({
             </div>
           </div>
 
+          {stackIds.length > 0 && (
+            <>
+              <div className="h-5 w-px bg-surface"></div>
+              <button
+                className={clsx(
+                  'w-8 h-8 flex items-center justify-center rounded-md transition-colors shrink-0',
+                  anyStackClosed
+                    ? 'text-text-secondary hover:bg-surface hover:text-text-primary'
+                    : 'text-text-primary bg-surface',
+                )}
+                onClick={() => toggleAllStacks(stackIds)}
+                data-tooltip={
+                  anyStackClosed
+                    ? t('ui.bottomBar.tooltips.openAllStacks', { count: stackIds.length })
+                    : t('ui.bottomBar.tooltips.closeAllStacks', { count: stackIds.length })
+                }
+              >
+                <Layers size={18} />
+              </button>
+            </>
+          )}
+
+          {/* BLITZRAW: the bar always says something about the card.
+              It used to collapse to nothing below two selected, so with one
+              photo picked, or none, the corner went blank and the size of the
+              folder was nowhere on screen. Now the selection reads when there
+              is one to read, and the count of what is on screen otherwise. */}
           <div
             className={clsx(
               'flex items-center transition-all duration-300 ease-out overflow-hidden',
-              showSelectionCounter ? 'max-w-xs opacity-100' : 'max-w-0 opacity-0',
+              // Wide enough that the long form never clips. The cap is here to
+              // animate against, not to constrain: 'Selected: 159 files (136 in
+              // 34 stacks, 23 individual)' ran past 20rem and lost its tail.
+              'max-w-2xl opacity-100',
             )}
           >
             <div className="h-5 w-px bg-surface mr-4"></div>
             <Text as="span" className="whitespace-nowrap">
-              {t('ui.bottomBar.imagesSelected', { current: numSelected, total })}
+              {showSelectionCounter
+                ? selectionSummary.stacks === 0
+                  ? t('ui.bottomBar.imagesSelected', { current: numSelected, total })
+                  : selectionSummary.individual === 0
+                    ? t('ui.bottomBar.imagesSelectedInStacks', {
+                        count: selectionSummary.stacks,
+                        files: selectionSummary.files,
+                      })
+                    : t('ui.bottomBar.imagesSelectedWithStacks', {
+                        clicked: selectionSummary.clicked,
+                        count: selectionSummary.stacks,
+                        files: selectionSummary.files,
+                        individual: selectionSummary.individual,
+                      })
+                : isFiltered
+                  ? t('ui.bottomBar.imagesShownFiltered', { shown, total })
+                  : t('ui.bottomBar.imagesShown', { count: total })}
             </Text>
           </div>
         </div>

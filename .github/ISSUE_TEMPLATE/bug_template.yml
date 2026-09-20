@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug or issue with RapidRAW
+description: Report a bug or issue with BlitzRaw
 title: "BUG: "
 labels: ["bug"]
 body:
@@ -59,10 +59,10 @@ body:
       required: true
 
   - type: input
-    id: rapidraw-version
+    id: blitzraw-version
     attributes:
-      label: RapidRAW Version
-      description: What version of RapidRAW are you using?
+      label: BlitzRaw Version
+      description: What version of BlitzRaw are you using?
       placeholder: e.g., v1.4.3
     validations:
       required: true
@@ -79,7 +79,7 @@ body:
       value: |
         ### Lenses & Camera Support
 
-        RapidRAW relies on external libraries for lens corrections and raw file decoding. If your camera or lens is unsupported, please open an issue directly with the relevant project:
+        BlitzRaw relies on external libraries for lens corrections and raw file decoding. If your camera or lens is unsupported, please open an issue directly with the relevant project:
 
         | Feature | Library | Request addition |
         |---|---|---|

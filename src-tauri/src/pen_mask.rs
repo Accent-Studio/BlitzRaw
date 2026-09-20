@@ -327,8 +327,16 @@ mod tests {
         let mask = fill_polygon(&flatten(&square, 1.0, (0.0, 0.0)), 40, 40);
 
         assert_eq!(mask.get_pixel(20, 20)[0], 255, "the middle is filled");
-        assert_eq!(mask.get_pixel(5, 20)[0], 0, "outside the left edge is empty");
-        assert_eq!(mask.get_pixel(35, 20)[0], 0, "outside the right edge is empty");
+        assert_eq!(
+            mask.get_pixel(5, 20)[0],
+            0,
+            "outside the left edge is empty"
+        );
+        assert_eq!(
+            mask.get_pixel(35, 20)[0],
+            0,
+            "outside the right edge is empty"
+        );
         assert_eq!(mask.get_pixel(20, 5)[0], 0, "above the shape is empty");
         assert_eq!(mask.get_pixel(20, 35)[0], 0, "below the shape is empty");
     }
@@ -367,7 +375,11 @@ mod tests {
             (100..=155).contains(&edge),
             "the half-covered pixel should be near 128, was {edge}"
         );
-        assert_eq!(mask.get_pixel(19, 20)[0], 255, "the pixel before it is full");
+        assert_eq!(
+            mask.get_pixel(19, 20)[0],
+            255,
+            "the pixel before it is full"
+        );
         assert_eq!(mask.get_pixel(21, 20)[0], 0, "the pixel after it is empty");
     }
 

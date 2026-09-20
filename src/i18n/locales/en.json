@@ -3,7 +3,8 @@
     "basic": {
       "blacks": "Blacks",
       "contrast": "Contrast",
-      "evShift": "EV Shift",
+      "brightness": "Brightness",
+      "evShift": "Exposure",
       "exposure": "Exposure",
       "highlights": "Highlights",
       "mappers": {
@@ -61,9 +62,12 @@
       "tint": "Tint",
       "toggleSliders": "Toggle Sliders",
       "vibrance": "Vibrance",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "White Balance Picker",
       "wbPickerWgpuDisabled": "WB Picker: Disable WGPU in Settings.",
-      "whiteBalance": "White Balance"
+      "whiteBalance": "White Balance",
+      "mixerAll": "All"
     },
     "curves": {
       "channelTitle": "{{channel}} Channel",
@@ -191,6 +195,8 @@
       "mergeHdr": "Merge to HDR",
       "noLabel": "No Label",
       "noRating": "No Rating",
+      "increaseRating": "Increase rating",
+      "decreaseRating": "Decrease rating",
       "pasteAdjustments": "Paste Adjustments",
       "productivity": "Productivity",
       "rating": "Rating",
@@ -236,12 +242,20 @@
       "addToAlbum": "Add to Album",
       "autoAdjust_one": "Auto Adjust Image",
       "autoAdjust_other": "Auto Adjust Images",
+      "autoStackBursts": "Auto-Stack Bursts",
+      "autoStack_one": "Auto-Stack Bracket",
+      "autoStack_other": "Auto-Stack {{count}} Images",
+      "buildPreviews": "Build Previews ({{count}})",
+      "closeStacks_one": "Close Stack",
+      "closeStacks_other": "Close {{count}} Stacks",
       "collage_one": "Frame Image",
       "collage_other": "Create Collage",
       "confirmDelete": "Confirm Delete",
       "confirmDeleteVc": "Confirm Delete + Virtual Copies",
       "convertNegative_one": "Convert Negative",
       "convertNegative_other": "Convert Negatives",
+      "convertToDng_one": "Convert to DNG",
+      "convertToDng_other": "Convert {{count}} to DNG",
       "copyImage_one": "Copy Image",
       "copyImage_other": "Copy {{count}} Images",
       "cullImage_one": "Cull Image",
@@ -252,13 +266,20 @@
       "deleteSelected": "Delete Selected Only",
       "denoise_one": "Denoise Image",
       "denoise_other": "Denoise Images",
+      "discardPreviews": "Discard Previews",
       "duplicateImage": "Duplicate Image",
       "exportImage_one": "Export Image",
       "exportImage_other": "Export {{count}} Images",
+      "mergeMenu": "Merge",
+      "mergeStackedHdr_one": "Merge Stack to HDR",
+      "mergeStackedHdr_other": "Merge {{count}} Stacks to HDR",
       "noAlbums": "No Albums Available",
+      "openStacks_one": "Open Stack",
+      "openStacks_other": "Open {{count}} Stacks",
       "pasteAdjustments_one": "Paste Adjustments",
       "pasteAdjustments_other": "Paste Adjustments to {{count}} Images",
       "physicalCopy": "Physical Copy",
+      "rebuildPreviews": "Rebuild Previews ({{count}})",
       "removeFromAlbum_one": "Remove from Album",
       "removeFromAlbum_other": "Remove {{count}} Images from Album",
       "renameImage_one": "Rename Image",
@@ -266,6 +287,11 @@
       "resetAdjustments_one": "Reset Adjustments",
       "resetAdjustments_other": "Reset Adjustments on {{count}} Images",
       "showExplorer": "Show in File Explorer",
+      "stackImages_one": "Stack",
+      "stackImages_other": "Stack {{count}} Images",
+      "stacksMenu": "Stacks",
+      "unstack_one": "Unstack",
+      "unstack_other": "Unstack {{count}} Stacks",
       "virtualCopy": "Virtual Copy"
     },
     "toasts": {
@@ -295,10 +321,12 @@
       },
       "sections": {
         "basic": "Basic",
-        "color": "Color",
+        "color": "Color Grading",
         "curves": "Curves",
         "details": "Details",
-        "effects": "Effects"
+        "effects": "Effects",
+        "colorCorrection": "Color Correction",
+        "colorMixer": "Color Mixer"
       },
       "title": "Adjustments",
       "tooltips": {
@@ -340,7 +368,7 @@
       "comingSoon": "Coming Soon",
       "connection": {
         "backendLabel": "AI Backend:",
-        "builtinDesc": "Using basic local CPU. Select Cloud or AI Connector in settings for generative replace.",
+        "builtinDesc": "Running on this computer. Choose Cloud or AI Connector in settings for generative replace.",
         "builtinLabel": "Built-in AI:",
         "cloudLabel": "Cloud AI:",
         "connectorConnectedDesc": "Connected to local generative backend.",
@@ -661,6 +689,10 @@
       },
       "title": "Metadata"
     },
+    "navigator": {
+      "empty": "Hover a photo to see it here",
+      "hovering": "hovering"
+    },
     "presets": {
       "amount": "Amount",
       "dialog": {
@@ -709,6 +741,13 @@
         "tool": "Tool"
       }
     },
+    "scopes": {
+      "add": "Add a scope",
+      "count_one": "{{count}} scope",
+      "count_other": "{{count}} scopes",
+      "remove": "Remove the last scope",
+      "resize": "Drag to change this scope height"
+    },
     "switcher": {
       "tooltips": {
         "adjust": "Adjust",
@@ -717,7 +756,10 @@
         "info": "Info",
         "inpaint": "Inpaint",
         "masks": "Masks",
-        "presets": "Presets"
+        "navigator": "Navigator",
+        "presets": "Presets",
+        "scopes": "Scopes",
+        "history": "History"
       }
     },
     "toolbar": {
@@ -735,6 +777,11 @@
         "undo": "Undo (Ctrl+Z) or History (Right-click)"
       },
       "vc": "VC"
+    },
+    "history": {
+      "count_one": "{{count}} step",
+      "count_other": "{{count}} steps",
+      "noPhoto": "Open a photo to see what has been done to it."
     }
   },
   "export": {
@@ -993,6 +1040,8 @@
       "tooltipAperture": "Aperture",
       "tooltipFocalLength": "Focal Length",
       "tooltipIso": "ISO",
+      "tooltipRating_one": "1 star",
+      "tooltipRating_other": "{{count}} stars",
       "tooltipShutterSpeed": "Shutter Speed",
       "tooltipVirtualCopy": "Virtual Copy"
     },
@@ -1012,9 +1061,14 @@
       "rating": "Rating",
       "shutterSpeed": "Shutter Speed"
     },
+    "stack": {
+      "collapse": "Collapse stack of {{count}}",
+      "expand": "Expand stack of {{count}}"
+    },
     "splash": {
       "addFolder": "Add Folder",
-      "brand": "RapidRAW",
+      "brand": "BlitzRaw",
+      "alwaysContinue": "Always skip this screen",
       "continueSession": "Continue Session",
       "contribute": "Contribute on GitHub",
       "descriptionAndroid": "A blazingly fast, GPU-accelerated RAW image editor. Open the library to begin.",
@@ -1050,9 +1104,17 @@
       "small": "Small"
     },
     "tooltips": {
+      "appSettings": "Settings",
       "communityPresets": "Community Presets",
       "goHome": "Go to Home",
       "importImages": "Import Images"
+    },
+    "busy": {
+      "thumbnails": "Rendering thumbnails ({{current}}/{{total}})",
+      "indexing": "Indexing this folder",
+      "loading": "Loading this folder",
+      "working": "Working",
+      "previews": "Building previews ({{current}}/{{total}})"
     }
   },
   "masks": {
@@ -1068,6 +1130,7 @@
       "linear": "Linear",
       "luminance": "Luminance",
       "others": "Others",
+      "pen": "Pen",
       "quickErase": "Quick Erase",
       "quickEraser": "Quick Eraser",
       "radial": "Radial",
@@ -1105,6 +1168,7 @@
     },
     "configurePreset": {
       "cancel": "Cancel",
+      "includedAdjustments": "Included Adjustments",
       "includeCropTransform": "Include Crop & Transform",
       "includeMasks": "Include Masks",
       "placeholder": "Enter preset name...",
@@ -1118,7 +1182,8 @@
     },
     "confirm": {
       "cancel": "Cancel",
-      "confirm": "Confirm"
+      "confirm": "Confirm",
+      "typeToConfirm": "Type {{phrase}} below to confirm."
     },
     "copyPaste": {
       "autoSyncDesc": "Automatically apply adjustments to all selected images.",
@@ -1158,6 +1223,28 @@
       "selectAll": "Select All",
       "selectNone": "Select None",
       "title": "Copy & Paste Settings"
+    },
+    "autoStack": {
+      "analyzing": "Reading capture metadata...",
+      "apply": "Create {{stacks}} stacks",
+      "bracketSizes": "Bracket sizes",
+      "cancel": "Cancel",
+      "extraTime": "Extra time allowed",
+      "extraTimeHint": "Added on top of an allowance already derived from each frame's shutter speed, so long exposures get more room automatically.",
+      "frameCount": "{{count}} frames",
+      "frameStacks": "{{size}}-frame brackets",
+      "leftOver": "Not part of a bracket",
+      "noneFound": "No brackets found in this selection.",
+      "oddOnly": "Cameras only shoot brackets in odd numbers.",
+      "created": "Stacked {{frames}} frames into {{stacks}} brackets.",
+      "subtitle": "Looking for exposure brackets in {{count}} selected images.",
+      "title": "Auto-Stack Brackets"
+    },
+    "bulkHdr": {
+      "autoAlign": "Align frames before merging (for handheld brackets)",
+      "confirm": "Merge",
+      "message": "Merge {{stacks}} stacks, {{frames}} frames in total. Each stack becomes one HDR saved beside its source frames. Stacks already merged are skipped.",
+      "title": "Merge stacks to HDR"
     },
     "createAlbum": {
       "placeholder": "Enter album name..."
@@ -1217,7 +1304,7 @@
       "downloadingText": "Downloading {{status}}...",
       "gpuWarningTooltip": "NIND Denoise does not yet support GPU acceleration due to dependency limitations.",
       "initializing": "Initializing...",
-      "methodAi": "NIND (AI - Best for RAW)",
+      "methodAi": "NIND (faster)",
       "methodBm3d": "BM3D (Traditional - All formats)",
       "methodLabel": "Method",
       "openInEditor": "Open in Editor",
@@ -1230,7 +1317,12 @@
       "speedNotice": "This may take a few minutes depending on image size and selected method.",
       "strengthLabel": "Strength",
       "titleBatch": "Denoise Images",
-      "titleSingle": "Denoise Image"
+      "titleSingle": "Denoise Image",
+      "methodScunet": "SCUNet (best quality)",
+      "patchNavigator": "Where to look",
+      "patchHint": "Drag the box over the part you are worried about.",
+      "patchTiming": "{{size}} px square, {{seconds}} s",
+      "holdForOriginal": "Hold to see the original"
     },
     "hdr": {
       "cancel": "Cancel",
@@ -1384,6 +1476,18 @@
       "yAxis": "Y Axis",
       "zoomInTooltip": "Zoom In",
       "zoomOutTooltip": "Zoom Out"
+    },
+    "burstStack": {
+      "analyzing": "Reading capture metadata...",
+      "apply": "Create {{stacks}} stacks",
+      "cancel": "Cancel",
+      "frameStacks": "{{size}}-frame bursts",
+      "leftOver": "Not part of a burst",
+      "maxGap": "Longest gap in a burst",
+      "maxGapHint": "Frames closer together than this are one burst. A run whose exposure compensation moves is a bracket, not a burst, and is left alone.",
+      "noneFound": "No bursts found in this selection.",
+      "subtitle": "Looking for bursts in {{count}} selected images.",
+      "title": "Auto-Stack Bursts"
     }
   },
   "settings": {
@@ -1419,7 +1523,7 @@
     "data": {
       "clearSidecars": "Clear All Sidecar Files",
       "clearSidecarsButton": "Clear",
-      "clearSidecarsDesc": "This will delete all .rrdata files (containing your edits) within your root folders:",
+      "clearSidecarsDesc": "This moves every .rrdata and .rrexif file to the Recycle Bin. Those hold your edits, ratings and labels for every photo inside your root folders:",
       "clearThumbnail": "Clear Thumbnail Cache",
       "clearThumbnailButton": "Clear",
       "clearThumbnailDesc": "This will delete all cached thumbnail images. They will be regenerated automatically as you browse your library.",
@@ -1440,7 +1544,8 @@
         "confirmClearCache": "Clear Cache",
         "confirmDeleteAllEdits": "Delete All Edits",
         "confirmTitle": "Confirm Deletion",
-        "sidecarMessage": "Are you sure you want to delete all sidecar files?\n\nThis will permanently remove all your edits for all images inside all active root folders and their subfolders."
+        "sidecarMessage": "This deletes every edit, rating and label for every photo inside all of your root folders and their subfolders.\n\nThe files go to the Recycle Bin, so this can be undone from there, but only until the bin is emptied.",
+        "sidecarPhrase": "delete"
       },
       "noFolders": "No folders selected",
       "statuses": {
@@ -1479,18 +1584,41 @@
       "font": "Font",
       "fontDesc": "Change the application font.",
       "nativeTitlebar": "Native Titlebar",
-      "nativeTitlebarDesc": "Use your system's default window titlebar instead of RapidRAW's custom one.",
+      "nativeTitlebarDesc": "Use your system's default window titlebar instead of BlitzRaw's custom one.",
       "poppins": "Poppins",
       "showImageCounts": "Show Image Counts",
       "system": "System Default",
       "theme": "Theme",
       "themeDesc": "Change the look and feel of the application.",
       "title": "General Settings",
+      "workspace": "Panel layouts",
+      "workspaceCurrent": "current",
+      "workspaceDelete": "Delete",
+      "workspaceDeleted": "Deleted \"{{name}}\".",
+      "workspaceDesc": "The arrangement on screen is kept as you change it. Name one to come back to it later, or put everything back the way it shipped.",
+      "workspaceLoad": "Load",
+      "workspaceLoaded": "Loaded \"{{name}}\".",
+      "workspaceNamePlaceholder": "Name this layout",
+      "workspaceOverwrite": "Overwrite",
+      "workspaceOverwritten": "Overwrote \"{{name}}\".",
+      "workspaceReset": "Layout back to the default.",
+      "workspaceResetAction": "Reset to default",
+      "workspaceSave": "Save",
+      "workspaceSaved": "Saved \"{{name}}\".",
       "xmpSync": "XMP Metadata Sync",
-      "xmpSyncDesc": "Sync ratings, color labels and tags to standard XMP sidecar files for compatibility with other photo editors."
+      "xmpSyncDesc": "Sync ratings, color labels and tags to standard XMP sidecar files for compatibility with other photo editors. Also reads the rating your camera wrote into the photo, so stars added during a shoot show up here."
     },
     "keybinds": {
+      "addToQuick": "Add to Quick Adjustments",
+      "alreadyQuick": "Already in Quick Adjustments",
+      "addedToQuick": "{{name}} added to Quick Adjustments. Assign a key in Settings.",
       "actions": {
+        "quick_exposure_up": "Exposure up (0.1 stop)",
+        "quick_exposure_down": "Exposure down (0.1 stop)",
+        "quick_temperature_up": "White balance warmer (50K)",
+        "quick_temperature_down": "White balance cooler (50K)",
+        "quick_rotation_up": "Rotate right (0.1 degree)",
+        "quick_rotation_down": "Rotate left (0.1 degree)",
         "brush_size_down": "Decrease brush size",
         "brush_size_up": "Increase brush size",
         "color_label_blue": "Color label: Blue",
@@ -1504,7 +1632,13 @@
         "copy_image_path": "Copy path of selected image(s)",
         "cycle_zoom": "Cycle zoom (Fit, 2x Fit, 100%)",
         "delete_selected": "Delete selected file(s)",
+        "deselect_all": "Deselect all images",
+        "enter_loupe_view": "Open selected image large",
+        "exit_to_grid": "Back to grid view",
+        "extend_selection_next": "Extend selection forwards",
+        "extend_selection_prev": "Extend selection backwards",
         "focus_search": "Focus search field",
+        "invert_selection": "Invert selection",
         "open_image": "Open selected image",
         "open_settings": "Open settings",
         "paste_adjustments": "Paste copied adjustments",
@@ -1546,6 +1680,7 @@
         "zoom_out_step": "Zoom out (by step)"
       },
       "sections": {
+        "quick": "Quick Adjustments",
         "editing": "Editing",
         "library": "Library",
         "panels": "Panels",
@@ -1592,7 +1727,7 @@
         "connector": {
           "address": "AI Connector Address",
           "addressDesc": "Enter the address and port of your running AI Connector instance. Required for generative AI features.",
-          "description": "For users with a capable GPU who want maximum control, connect RapidRAW to your own Connector server. This gives you full control for technical workflows.",
+          "description": "For users with a capable GPU who want maximum control, connect BlitzRaw to your own Connector server. This gives you full control for technical workflows.",
           "failed": "Connection failed.",
           "feature1": "Use your own ComfyUI instance",
           "feature2": "Cost-free advanced generative edits",
@@ -1603,17 +1738,17 @@
           "title": "Self-Hosted (RapidRAW AI Connector)"
         },
         "cpu": {
-          "description": "Integrated directly into RapidRAW, these features run entirely on your computer. They are fast, free, and require no setup, making them ideal for everyday workflow acceleration.",
+          "description": "Runs on your own machine: the graphics card when there is a suitable one, the processor otherwise. Masking, tagging, denoising and simple generative replace. No setup and no account.",
           "feature1": "AI Masking (Subject, Sky, Foreground)",
           "feature2": "Automatic Image Tagging",
           "feature3": "Simple CPU-based Generative Replace",
-          "title": "Built-in AI (CPU)"
+          "title": "Built-in AI (this computer)"
         },
-        "description": "RapidRAW's AI is built for flexibility. Choose your ideal workflow, from fast local tools to powerful self-hosting.",
+        "description": "BlitzRaw's AI is built for flexibility. Choose your ideal workflow, from fast local tools to powerful self-hosting.",
         "providers": {
           "aiConnector": "AI Connector",
           "cloud": "Cloud",
-          "cpu": "CPU"
+          "cpu": "This computer"
         },
         "title": "Generative AI"
       },
@@ -1705,7 +1840,10 @@
       "wgpuDescRecommended": "Bypasses browser encoding for instantly responsive live previews. Highly recommended for performance.",
       "wgpuLabel": "Enable Direct WGPU Render",
       "workerThreads": "Thumbnail Worker Threads",
-      "workerThreadsDesc": "Number of parallel threads used to generate thumbnails. Higher values speed up library loading but use more CPU & RAM."
+      "workerThreadsDesc": "Number of parallel threads used to generate thumbnails. Higher values speed up library loading but use more CPU & RAM.",
+      "historySteps": "History depth",
+      "historyStepsDesc": "How many edit steps each photo keeps before the oldest are dropped. Higher uses more memory.",
+      "steps": "Steps"
     },
     "tagging": {
       "addCustomPlaceholder": "Add custom AI tags (comma separated)...",
@@ -1724,7 +1862,7 @@
       "clearCustomTooltip": "Clear AI Tag List",
       "clearShortcutsTooltip": "Clear Shortcuts Tag List",
       "customList": "Custom AI Tag List",
-      "customListDesc": "If provided, the AI will ONLY use tags from this list, overriding RapidRAW’s built-in list. Tagging works only in English.",
+      "customListDesc": "If provided, the AI will ONLY use tags from this list, overriding BlitzRaw’s built-in list. Tagging works only in English.",
       "maxAiTags": "Maximum AI Tags",
       "maxAiTagsDesc": "The maximum number of tags to generate per image.",
       "noCustomTags": "No custom AI tags (Using built-in list)",
@@ -1736,18 +1874,19 @@
       "title": "Tagging"
     },
     "thanks": {
-      "description": "A huge thank you to the following projects that were very important in the development of RapidRAW:",
+      "description": "A huge thank you to the following projects that were very important in the development of BlitzRaw:",
       "list": {
         "darktable": "For some reference implementations that guided parts of this work.",
         "depth": "For the powerful monocular depth estimation model that enables the AI depth masking capabilities.",
         "lama": "For the powerful & simple image inpainting model, which enables content-aware fill and object removal.",
         "lensfun": "For its invaluable open-source library and comprehensive database for automatic lens correction.",
         "negpy": "For the inspiration behind the negative conversion logic.",
-        "nind": "For providing AI models that power the AI noise reduction capabilities in RapidRAW.",
+        "nind": "For providing AI models that power the AI noise reduction capabilities in BlitzRaw.",
+        "rapidraw": "For the editor BlitzRaw grew out of. BlitzRaw is a fork of RapidRAW and keeps its AGPL-3.0 licence.",
         "rawler": "For the excellent Rust crate that provides the foundation for RAW file processing in this project.",
         "sam2": "For providing the foundation model used for the AI subject detection capabilities.",
         "u2net": "For providing the robust architecture used for the AI sky and foreground detection capabilities.",
-        "you": "For using and supporting RapidRAW. Your interest keeps this project alive and evolving.",
+        "you": "For using and supporting BlitzRaw. Your interest keeps this project alive and evolving.",
         "youLabel": "You"
       },
       "title": "Special Thanks"
@@ -1765,7 +1904,15 @@
   "ui": {
     "bottomBar": {
       "imagesSelected": "{{current}} of {{total}} images selected",
+      "imagesShown_one": "{{count}} image",
+      "imagesShown_other": "{{count}} images",
+      "imagesShownFiltered": "Showing {{shown}} of {{total}} images",
+      "imagesSelectedInStacks_one": "{{count}} stack selected, {{files}} files",
+      "imagesSelectedInStacks_other": "{{count}} stacks selected, {{files}} files",
+      "imagesSelectedWithStacks_one": "{{clicked}} selected ({{count}} stack, {{individual}} individual), {{files}} files",
+      "imagesSelectedWithStacks_other": "{{clicked}} selected ({{count}} stacks, {{individual}} individual), {{files}} files",
       "tooltips": {
+        "closeAllStacks": "Close all {{count}} stacks",
         "collapseFilmstrip": "Collapse Filmstrip",
         "collapseLeft": "Collapse Left Panel",
         "collapseRight": "Collapse Right Panel",
@@ -1776,6 +1923,7 @@
         "expandLeft": "Expand Left Panel",
         "expandRight": "Expand Right Panel",
         "export": "Export",
+        "openAllStacks": "Open all {{count}} stacks",
         "pasteSettings": "Paste Settings",
         "quickFilter": "Quick Filter",
         "rateStars_one": "Rate 1 star",
@@ -1845,8 +1993,19 @@
         "parade": "Parade",
         "rgb": "RGB Overlay",
         "showClipping": "Show Clipping Warnings",
-        "vectorscope": "Vectorscope"
+        "vectorscope": "Vectorscope",
+        "vectorscopeGain": "Vectorscope gain: push the trace out from the centre"
       }
     }
+  },
+  "notifications": {
+    "burstsCreated": "Stacked {{frames}} frames into {{stacks}} bursts.",
+    "previewsBuilt": "Built {{built}} previews",
+    "previewsBuiltWithSkips": "Built {{built}} previews, {{skipped}} already current",
+    "previewsDiscarded": "Discarded {{count}} previews",
+    "previewsFailed": "Could not build {{failed}} previews: {{reason}}",
+    "stacked": "Stacked {{count}} images.",
+    "unstacked_one": "Took 1 stack apart.",
+    "unstacked_other": "Took {{count}} files out of their stacks."
   }
 }

@@ -73,6 +73,12 @@ export interface ExportState {
   errorMessage: string;
   progress: Progress;
   status: Status;
+  /**
+   * BLITZRAW: what this export was asked for, so that when it finishes each of
+   * those photos can have the state it went out in pinned into its history. On
+   * finishing rather than on starting, so a cancelled export pins nothing.
+   */
+  paths?: Array<string>;
 }
 
 export interface FileFormat {

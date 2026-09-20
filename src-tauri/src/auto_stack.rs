@@ -120,7 +120,11 @@ fn is_bracket(run: &[Frame], params: &AutoStackParams) -> bool {
         return false;
     }
 
-    let Some(exposures) = run.iter().map(|f| f.exposure_bias).collect::<Option<Vec<_>>>() else {
+    let Some(exposures) = run
+        .iter()
+        .map(|f| f.exposure_bias)
+        .collect::<Option<Vec<_>>>()
+    else {
         return false;
     };
 
@@ -135,12 +139,11 @@ fn is_bracket(run: &[Frame], params: &AutoStackParams) -> bool {
     }
 
     // Each pause has to be explainable by the exposure that preceded it.
-    run.windows(2).all(|pair| {
-        match (pair[0].captured_at, pair[1].captured_at) {
+    run.windows(2)
+        .all(|pair| match (pair[0].captured_at, pair[1].captured_at) {
             (Some(before), Some(after)) => (after - before) <= gap_budget(&pair[0], params),
             _ => false,
-        }
-    })
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,9 +292,9 @@ pub fn propose_stacks(mut frames: Vec<Frame>, params: &AutoStackParams) -> AutoS
     while index < frames.len() {
         // Largest first: the leading frames of a five-shot bracket do not match
         // the three-shot signature, but trying big to small keeps intent clear.
-        let matched = sizes
-            .iter()
-            .find(|size| index + **size <= frames.len() && is_bracket(&frames[index..index + **size], params));
+        let matched = sizes.iter().find(|size| {
+            index + **size <= frames.len() && is_bracket(&frames[index..index + **size], params)
+        });
 
         match matched {
             Some(&size) => {
@@ -506,7 +509,12 @@ mod tests {
         ];
         let preview = propose_stacks(frames, &AutoStackParams::default());
 
-        assert!(preview.stacks.iter().all(|s| !s.paths.len().is_multiple_of(2)));
+        assert!(
+            preview
+                .stacks
+                .iter()
+                .all(|s| !s.paths.len().is_multiple_of(2))
+        );
     }
 
     #[test]
@@ -662,8 +670,17 @@ mod tests {
             burst_frame("d", 4.6, 0.0),
             burst_frame("e", 4.9, 0.0),
         ];
-        let preview = propose_bursts(frames, &BurstParams { max_gap_seconds: 1.0, ..Default::default() });
-        assert_eq!(burst_paths(&preview), vec![vec!["a", "b", "c"], vec!["d", "e"]]);
+        let preview = propose_bursts(
+            frames,
+            &BurstParams {
+                max_gap_seconds: 1.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            burst_paths(&preview),
+            vec![vec!["a", "b", "c"], vec!["d", "e"]]
+        );
         assert!(preview.ungrouped.is_empty());
     }
 
@@ -673,7 +690,13 @@ mod tests {
         // budget by the exposure that preceded it. A burst is fast glass by
         // definition, so nothing here does that.
         let frames = vec![burst_frame("a", 0.0, 0.0), burst_frame("b", 3.0, 0.0)];
-        let preview = propose_bursts(frames, &BurstParams { max_gap_seconds: 1.0, ..Default::default() });
+        let preview = propose_bursts(
+            frames,
+            &BurstParams {
+                max_gap_seconds: 1.0,
+                ..Default::default()
+            },
+        );
         assert!(preview.stacks.is_empty(), "three seconds is not one burst");
         assert_eq!(preview.ungrouped, vec!["a", "b"]);
     }
@@ -688,7 +711,13 @@ mod tests {
             burst_frame("dark", 0.33, -2.0),
             burst_frame("bright", 0.66, 2.0),
         ];
-        let preview = propose_bursts(frames, &BurstParams { max_gap_seconds: 1.0, ..Default::default() });
+        let preview = propose_bursts(
+            frames,
+            &BurstParams {
+                max_gap_seconds: 1.0,
+                ..Default::default()
+            },
+        );
         assert!(preview.stacks.is_empty(), "a bracket is not a burst");
         assert_eq!(preview.ungrouped.len(), 3);
     }
@@ -701,7 +730,13 @@ mod tests {
             burst_frame("c", 0.6, 0.0),
         ];
         frames[1].exposure_bias = None;
-        let preview = propose_bursts(frames, &BurstParams { max_gap_seconds: 1.0, ..Default::default() });
+        let preview = propose_bursts(
+            frames,
+            &BurstParams {
+                max_gap_seconds: 1.0,
+                ..Default::default()
+            },
+        );
         assert_eq!(burst_paths(&preview), vec![vec!["a", "b", "c"]]);
     }
 
@@ -709,7 +744,13 @@ mod tests {
     fn a_frame_with_no_capture_time_is_never_grouped() {
         let mut frames = vec![burst_frame("a", 0.0, 0.0), burst_frame("b", 0.3, 0.0)];
         frames[1].captured_at = None;
-        let preview = propose_bursts(frames, &BurstParams { max_gap_seconds: 1.0, ..Default::default() });
+        let preview = propose_bursts(
+            frames,
+            &BurstParams {
+                max_gap_seconds: 1.0,
+                ..Default::default()
+            },
+        );
         assert!(preview.stacks.is_empty());
         assert_eq!(preview.ungrouped.len(), 2);
     }
@@ -725,7 +766,11 @@ mod tests {
         ];
         let preview = propose_bursts(
             frames,
-            &BurstParams { max_gap_seconds: 1.0, min_frames: 3, ..Default::default() },
+            &BurstParams {
+                max_gap_seconds: 1.0,
+                min_frames: 3,
+                ..Default::default()
+            },
         );
         assert_eq!(burst_paths(&preview), vec![vec!["c", "d", "e"]]);
         assert_eq!(preview.ungrouped, vec!["a", "b"]);
@@ -741,7 +786,10 @@ mod tests {
             burst_frame("e", 9.4, 0.0),
             burst_frame("f", 40.0, 0.0),
         ];
-        let params = BurstParams { max_gap_seconds: 1.0, ..Default::default() };
+        let params = BurstParams {
+            max_gap_seconds: 1.0,
+            ..Default::default()
+        };
         let forwards = propose_bursts(frames.clone(), &params);
 
         let mut backwards_input = frames.clone();
@@ -770,7 +818,13 @@ mod tests {
             burst_frame("b", 100.4, 0.0),
             burst_frame("c", 100.9, 0.0),
         ];
-        let preview = propose_bursts(frames, &BurstParams { max_gap_seconds: 1.0, ..Default::default() });
+        let preview = propose_bursts(
+            frames,
+            &BurstParams {
+                max_gap_seconds: 1.0,
+                ..Default::default()
+            },
+        );
         assert_eq!(preview.stacks.len(), 1);
         assert!((preview.stacks[0].span_seconds - 0.9).abs() < 1e-6);
         assert_eq!(preview.size_counts.get(&3), Some(&1));
@@ -955,7 +1009,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        let strict = propose_bursts(frames, &BurstParams { max_gap_seconds: 0.5, ..Default::default() });
+        let strict = propose_bursts(
+            frames,
+            &BurstParams {
+                max_gap_seconds: 0.5,
+                ..Default::default()
+            },
+        );
         eprintln!(
             "\nat 0.50s, ignoring exposure compensation would give {} bursts instead of {}",
             loose.stacks.len(),
@@ -1001,6 +1061,10 @@ mod tests {
         // Nothing may be invented or lost.
         let accounted: usize =
             preview.stacks.iter().map(|s| s.paths.len()).sum::<usize>() + preview.ungrouped.len();
-        assert_eq!(accounted, paths.len(), "frames went missing or were duplicated");
+        assert_eq!(
+            accounted,
+            paths.len(),
+            "frames went missing or were duplicated"
+        );
     }
 }

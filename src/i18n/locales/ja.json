@@ -61,6 +61,8 @@
       "tint": "色かぶり補正",
       "toggleSliders": "スライダー切り替え",
       "vibrance": "自然な彩度",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "ホワイトバランススポイト",
       "wbPickerWgpuDisabled": "WBスポイト: 設定でWGPUを無効にしてください。",
       "whiteBalance": "ホワイトバランス"

@@ -394,10 +394,10 @@ fn ratio_between(bright: &Rgb32FImage, dark: &Rgb32FImage) -> Option<(f32, f32)>
             let below = dark.get_pixel(x, y).0;
             let above_top = above[0].max(above[1]).max(above[2]);
             let below_top = below[0].max(below[1]).max(below[2]);
-            if above_top < BRIGHT_FLOOR || above_top > ROLL_OFF_START {
+            if !(BRIGHT_FLOOR..=ROLL_OFF_START).contains(&above_top) {
                 continue;
             }
-            if below_top < DARK_FLOOR || below_top > ROLL_OFF_START {
+            if !(DARK_FLOOR..=ROLL_OFF_START).contains(&below_top) {
                 continue;
             }
             let (a, b) = (luma(&above), luma(&below));
@@ -627,13 +627,21 @@ fn white_from(lights: impl Iterator<Item = f32>) -> f32 {
     assert!(!lights.is_empty(), "a bracket has frames");
     lights.sort_by(f32::total_cmp);
     let reference = lights[(lights.len() - 1) / 2];
-    if reference > 0.0 { 1.0 / reference } else { 1.0 }
+    if reference > 0.0 {
+        1.0 / reference
+    } else {
+        1.0
+    }
 }
 
 /// Scales a merged image for display, folding what is above white into a
 /// shoulder rather than clipping it.
 pub fn to_display(image: &Rgb32FImage, white: f32) -> Rgb32FImage {
-    let white = if white.is_finite() && white > 0.0 { white } else { 1.0 };
+    let white = if white.is_finite() && white > 0.0 {
+        white
+    } else {
+        1.0
+    };
     let w = SHOULDER_WHITE;
     // The slope of the straight part carried into the curved part, so the two
     // meet without a kink. Anything else shows as a band across a gradient.
@@ -653,7 +661,11 @@ pub fn to_display(image: &Rgb32FImage, white: f32) -> Rgb32FImage {
             // same slope and never quite reaches one.
             w + (1.0 - w) * (1.0 - (-(x - 1.0) * falloff).exp())
         };
-        *value = if toned.is_finite() { toned.clamp(0.0, 1.0) } else { 0.0 };
+        *value = if toned.is_finite() {
+            toned.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
     }
     out
 }
@@ -709,7 +721,11 @@ mod tests {
     fn restless_ramp(size: u32, actual_light: f32, from: f32, to: f32) -> Rgb32FImage {
         Rgb32FImage::from_fn(size, size, |x, y| {
             let t = x as f32 / (size - 1) as f32;
-            let actual = if y % 2 == 0 { actual_light } else { actual_light / 2.0 };
+            let actual = if y % 2 == 0 {
+                actual_light
+            } else {
+                actual_light / 2.0
+            };
             let recorded = ((from + (to - from) * t) * actual).min(1.0);
             Rgb([recorded, recorded, recorded])
         })
@@ -727,10 +743,8 @@ mod tests {
     fn frames_that_do_not_line_up_are_not_measured() {
         let long = wide_ramp(BIG, TRUE_LONG, RAMP_FROM, RAMP_TO);
         let short = restless_ramp(BIG, SHORT, RAMP_FROM, RAMP_TO);
-        let lights = measured_lights(&[
-            mislabelled(&long, CLAIMED_LONG),
-            mislabelled(&short, SHORT),
-        ]);
+        let lights =
+            measured_lights(&[mislabelled(&long, CLAIMED_LONG), mislabelled(&short, SHORT)]);
 
         assert!(
             (lights[0] - CLAIMED_LONG).abs() < 1e-6,
@@ -742,10 +756,8 @@ mod tests {
     fn the_real_exposure_step_is_read_off_the_pixels() {
         let long = wide_ramp(BIG, TRUE_LONG, RAMP_FROM, RAMP_TO);
         let short = wide_ramp(BIG, SHORT, RAMP_FROM, RAMP_TO);
-        let lights = measured_lights(&[
-            mislabelled(&long, CLAIMED_LONG),
-            mislabelled(&short, SHORT),
-        ]);
+        let lights =
+            measured_lights(&[mislabelled(&long, CLAIMED_LONG), mislabelled(&short, SHORT)]);
 
         let measured = lights[0] / lights[1];
         let truth = TRUE_LONG / SHORT;
@@ -796,10 +808,7 @@ mod tests {
         let long = wide_ramp(BIG, TRUE_LONG, RAMP_FROM, RAMP_TO);
         let short = wide_ramp(BIG, SHORT, RAMP_FROM, RAMP_TO);
 
-        let merged = merge_bracket(&[
-            mislabelled(&long, CLAIMED_LONG),
-            mislabelled(&short, SHORT),
-        ]);
+        let merged = merge_bracket(&[mislabelled(&long, CLAIMED_LONG), mislabelled(&short, SHORT)]);
 
         let steps: Vec<f32> = (1..merged.width())
             .map(|x| merged.get_pixel(x, 0).0[0] - merged.get_pixel(x - 1, 0).0[0])
@@ -809,7 +818,10 @@ mod tests {
         sorted.sort_by(f32::total_cmp);
         let typical = sorted[sorted.len() / 2];
 
-        assert!(typical > 0.0, "the ramp has to rise for this to mean anything");
+        assert!(
+            typical > 0.0,
+            "the ramp has to rise for this to mean anything"
+        );
         assert!(
             worst > 0.0,
             "the gradient reversed by {:.1} times the typical rise",
@@ -823,10 +835,8 @@ mod tests {
     fn too_few_pixels_to_measure_leaves_the_label_alone() {
         let long = field(40, 0.5, TRUE_LONG);
         let short = field(40, 0.5, SHORT);
-        let lights = measured_lights(&[
-            mislabelled(&long, CLAIMED_LONG),
-            mislabelled(&short, SHORT),
-        ]);
+        let lights =
+            measured_lights(&[mislabelled(&long, CLAIMED_LONG), mislabelled(&short, SHORT)]);
 
         assert!((lights[0] - CLAIMED_LONG).abs() < 1e-6, "{:?}", lights);
         assert!((lights[1] - SHORT).abs() < 1e-6, "{:?}", lights);
@@ -890,7 +900,11 @@ mod tests {
         let frames: Vec<Frame<'_>> = images
             .iter()
             .zip([0.25f32, 0.5, 1.0])
-            .map(|(image, t)| Frame { image, exposure: secs(t), gain: 1.0 })
+            .map(|(image, t)| Frame {
+                image,
+                exposure: secs(t),
+                gain: 1.0,
+            })
             .collect();
 
         let merged = merge_bracket(&frames);
@@ -899,7 +913,10 @@ mod tests {
 
         // And it agrees with the old merge, so a clean bracket is untouched.
         let old = without_the_condition(&frames);
-        assert!((old[0] - got[0]).abs() < 1e-5, "clean brackets must not change");
+        assert!(
+            (old[0] - got[0]).abs() < 1e-5,
+            "clean brackets must not change"
+        );
     }
 
     #[test]
@@ -911,15 +928,26 @@ mod tests {
         let short = flat([truth * 0.25, truth * 0.25, truth * 0.25]);
         let long = flat([1.0, 1.0, 1.0]);
         let frames = [
-            Frame { image: &short, exposure: secs(0.25), gain: 1.0 },
-            Frame { image: &long, exposure: secs(1.0), gain: 1.0 },
+            Frame {
+                image: &short,
+                exposure: secs(0.25),
+                gain: 1.0,
+            },
+            Frame {
+                image: &long,
+                exposure: secs(1.0),
+                gain: 1.0,
+            },
         ];
 
         let got = merge_bracket(&frames).get_pixel(0, 0).0;
         assert!((got[0] - truth).abs() < 1e-4, "{got:?} should be {truth}");
 
         let old = without_the_condition(&frames);
-        assert!(old[0] < truth * 0.6, "the old merge should be far too dark: {old:?}");
+        assert!(
+            old[0] < truth * 0.6,
+            "the old merge should be far too dark: {old:?}"
+        );
     }
 
     #[test]
@@ -932,13 +960,24 @@ mod tests {
         // At one second red would be 2.4 and clips; the others fit.
         let long = flat([1.0, truth[1], truth[2]]);
         let frames = [
-            Frame { image: &short, exposure: secs(0.25), gain: 1.0 },
-            Frame { image: &long, exposure: secs(1.0), gain: 1.0 },
+            Frame {
+                image: &short,
+                exposure: secs(0.25),
+                gain: 1.0,
+            },
+            Frame {
+                image: &long,
+                exposure: secs(1.0),
+                gain: 1.0,
+            },
         ];
 
         let got = merge_bracket(&frames).get_pixel(0, 0).0;
         for c in 0..3 {
-            assert!((got[c] - truth[c]).abs() < 1e-4, "{got:?} should be {truth:?}");
+            assert!(
+                (got[c] - truth[c]).abs() < 1e-4,
+                "{got:?} should be {truth:?}"
+            );
         }
 
         // The ratios are what the eye reads as colour, and the old merge got
@@ -951,7 +990,10 @@ mod tests {
             "the old merge should have skewed the colour: {old:?}"
         );
         let got_ratio = got[0] / got[2];
-        assert!((got_ratio - truth_ratio).abs() < 1e-3, "and this one should not");
+        assert!(
+            (got_ratio - truth_ratio).abs() < 1e-3,
+            "and this one should not"
+        );
     }
 
     #[test]
@@ -962,13 +1004,24 @@ mod tests {
         let short = flat([1.0, 1.0, 1.0]);
         let long = flat([1.0, 1.0, 1.0]);
         let frames = [
-            Frame { image: &short, exposure: secs(0.25), gain: 1.0 },
-            Frame { image: &long, exposure: secs(1.0), gain: 1.0 },
+            Frame {
+                image: &short,
+                exposure: secs(0.25),
+                gain: 1.0,
+            },
+            Frame {
+                image: &long,
+                exposure: secs(1.0),
+                gain: 1.0,
+            },
         ];
 
         let got = merge_bracket(&frames).get_pixel(0, 0).0;
         // The shortest exposure gives the highest lower bound: 1.0 / 0.25.
-        assert!((got[0] - 4.0).abs() < 1e-4, "{got:?} should fall back to the shortest frame");
+        assert!(
+            (got[0] - 4.0).abs() < 1e-4,
+            "{got:?} should fall back to the shortest frame"
+        );
     }
 
     #[test]
@@ -979,17 +1032,32 @@ mod tests {
         let a = flat([truth * 0.25, truth * 0.25, truth * 0.25]);
         let b = flat([truth * 1.0, truth * 1.0, truth * 1.0]);
         let frames = [
-            Frame { image: &a, exposure: secs(0.25), gain: 1.0 },
-            Frame { image: &b, exposure: secs(1.0), gain: 1.0 },
+            Frame {
+                image: &a,
+                exposure: secs(0.25),
+                gain: 1.0,
+            },
+            Frame {
+                image: &b,
+                exposure: secs(1.0),
+                gain: 1.0,
+            },
         ];
         let got = merge_bracket(&frames).get_pixel(0, 0).0;
         assert!((got[0] - truth).abs() < 1e-5);
 
         // Only the short frame would give the same answer here, so prove the
         // long one was used: drop it and the divisor changes.
-        let only_short = [Frame { image: &a, exposure: secs(0.25), gain: 1.0 }];
+        let only_short = [Frame {
+            image: &a,
+            exposure: secs(0.25),
+            gain: 1.0,
+        }];
         let alone = merge_bracket(&only_short).get_pixel(0, 0).0;
-        assert!((alone[0] - truth).abs() < 1e-5, "one frame alone is still its own radiance");
+        assert!(
+            (alone[0] - truth).abs() < 1e-5,
+            "one frame alone is still its own radiance"
+        );
     }
 
     /// A ramp of true radiance, and what a frame records of it.
@@ -1046,12 +1114,23 @@ mod tests {
         let short = ramp_with(width, 0.2, 0.2, 2.0);
 
         let merged = merge_bracket(&[
-            Frame { image: &long, exposure: Duration::from_secs_f32(1.0), gain: 1.0 },
-            Frame { image: &short, exposure: Duration::from_secs_f32(0.2), gain: 1.0 },
+            Frame {
+                image: &long,
+                exposure: Duration::from_secs_f32(1.0),
+                gain: 1.0,
+            },
+            Frame {
+                image: &short,
+                exposure: Duration::from_secs_f32(0.2),
+                gain: 1.0,
+            },
         ]);
 
         let steps = steps(&merged);
-        assert!(steps.iter().all(|s| *s > 0.0), "the ramp must stay increasing");
+        assert!(
+            steps.iter().all(|s| *s > 0.0),
+            "the ramp must stay increasing"
+        );
 
         let mut sorted = steps.clone();
         sorted.sort_by(f32::total_cmp);
@@ -1087,8 +1166,16 @@ mod tests {
         let short = frame(0.2);
 
         let merged = merge_bracket(&[
-            Frame { image: &long, exposure: Duration::from_secs_f32(1.0), gain: 1.0 },
-            Frame { image: &short, exposure: Duration::from_secs_f32(0.2), gain: 1.0 },
+            Frame {
+                image: &long,
+                exposure: Duration::from_secs_f32(1.0),
+                gain: 1.0,
+            },
+            Frame {
+                image: &short,
+                exposure: Duration::from_secs_f32(0.2),
+                gain: 1.0,
+            },
         ]);
 
         for channel in 0..3 {
@@ -1118,8 +1205,16 @@ mod tests {
     #[test]
     fn the_weight_falls_off_without_a_step_in_it() {
         assert_eq!(weight_for(&[0.0, 0.0, 0.0]), 1.0);
-        assert_eq!(weight_for(&[ROLL_OFF_START, 0.0, 0.0]), 1.0, "full weight up to the ramp");
-        assert_eq!(weight_for(&[SATURATION, 0.0, 0.0]), 0.0, "nothing at clipping");
+        assert_eq!(
+            weight_for(&[ROLL_OFF_START, 0.0, 0.0]),
+            1.0,
+            "full weight up to the ramp"
+        );
+        assert_eq!(
+            weight_for(&[SATURATION, 0.0, 0.0]),
+            0.0,
+            "nothing at clipping"
+        );
         assert_eq!(weight_for(&[1.4, 0.1, 0.1]), 0.0, "nor beyond it");
 
         // Driven by the brightest channel, because the colour matrix has already
@@ -1162,17 +1257,35 @@ mod tests {
         // And flat at both ends, which is what a straight ramp would not be.
         let just_inside = weight_for(&[ROLL_OFF_START + 0.0005, 0.0, 0.0]);
         let just_before_end = weight_for(&[SATURATION - 0.0005, 0.0, 0.0]);
-        assert!(just_inside > 0.999, "the fade starts gently, got {just_inside}");
-        assert!(just_before_end < 0.001, "and ends gently, got {just_before_end}");
+        assert!(
+            just_inside > 0.999,
+            "the fade starts gently, got {just_inside}"
+        );
+        assert!(
+            just_before_end < 0.001,
+            "and ends gently, got {just_before_end}"
+        );
     }
 
     #[test]
     fn the_metered_white_is_the_middle_frame_of_the_bracket() {
         let flat_image = flat([0.0, 0.0, 0.0]);
         let frames = [
-            Frame { image: &flat_image, exposure: secs(0.25), gain: 1.0 },
-            Frame { image: &flat_image, exposure: secs(0.5), gain: 1.0 },
-            Frame { image: &flat_image, exposure: secs(1.0), gain: 1.0 },
+            Frame {
+                image: &flat_image,
+                exposure: secs(0.25),
+                gain: 1.0,
+            },
+            Frame {
+                image: &flat_image,
+                exposure: secs(0.5),
+                gain: 1.0,
+            },
+            Frame {
+                image: &flat_image,
+                exposure: secs(1.0),
+                gain: 1.0,
+            },
         ];
         // The middle frame clipped at 1.0 after half a second, so a radiance of
         // 2.0 is what it called white.
@@ -1185,7 +1298,10 @@ mod tests {
         let image = Rgb32FImage::from_pixel(1, 1, Rgb([2.0, 2.0, 2.0]));
         let shown = to_display(&image, 2.0);
         let v = shown.get_pixel(0, 0).0[0];
-        assert!((v - 0.8).abs() < 1e-4, "metered white should land at the shoulder: {v}");
+        assert!(
+            (v - 0.8).abs() < 1e-4,
+            "metered white should land at the shoulder: {v}"
+        );
     }
 
     #[test]
@@ -1207,7 +1323,10 @@ mod tests {
         let mut with_a_lamp = Rgb32FImage::from_pixel(2, 2, Rgb([0.4, 0.4, 0.4]));
         with_a_lamp.put_pixel(0, 0, Rgb([100.0, 100.0, 100.0]));
         let beside_a_lamp = to_display(&with_a_lamp, white).get_pixel(1, 1).0[0];
-        assert_eq!(room, beside_a_lamp, "the scale does not come from the picture");
+        assert_eq!(
+            room, beside_a_lamp,
+            "the scale does not come from the picture"
+        );
     }
 
     #[test]
@@ -1223,8 +1342,14 @@ mod tests {
             .get_pixel(0, 0)
             .0[0];
 
-        assert!(two > one, "a stop over white must be brighter than white: {one} then {two}");
-        assert!(four > two, "and two stops brighter still: {two} then {four}");
+        assert!(
+            two > one,
+            "a stop over white must be brighter than white: {one} then {two}"
+        );
+        assert!(
+            four > two,
+            "and two stops brighter still: {two} then {four}"
+        );
         assert!(four < 1.0, "without ever reaching pure white");
     }
 
@@ -1242,7 +1367,10 @@ mod tests {
         // Halving the light halves the value. Exactly, not approximately: below
         // the metered white this is a straight line and nothing else.
         let ratio = half / quarter;
-        assert!((ratio - 2.0).abs() < 1e-4, "shadows must stay linear: {ratio}");
+        assert!(
+            (ratio - 2.0).abs() < 1e-4,
+            "shadows must stay linear: {ratio}"
+        );
     }
 
     #[test]
@@ -1251,7 +1379,10 @@ mod tests {
         let shown = to_display(&image, 2.0);
         for pixel in shown.pixels() {
             for v in pixel.0 {
-                assert!(v.is_finite() && (0.0..=1.0).contains(&v), "{v} is not a colour");
+                assert!(
+                    v.is_finite() && (0.0..=1.0).contains(&v),
+                    "{v} is not a colour"
+                );
             }
         }
         assert_eq!(shown.get_pixel(0, 0).0[0], 0.0);
@@ -1265,8 +1396,16 @@ mod tests {
         let slow = flat([truth * 1.0, truth * 1.0, truth * 1.0]);
         let fast = flat([truth * 1.0, truth * 1.0, truth * 1.0]);
         let frames = [
-            Frame { image: &slow, exposure: secs(1.0), gain: 1.0 },
-            Frame { image: &fast, exposure: secs(0.5), gain: 2.0 },
+            Frame {
+                image: &slow,
+                exposure: secs(1.0),
+                gain: 1.0,
+            },
+            Frame {
+                image: &fast,
+                exposure: secs(0.5),
+                gain: 2.0,
+            },
         ];
         let got = merge_bracket(&frames).get_pixel(0, 0).0;
         assert!((got[0] - truth).abs() < 1e-5, "{got:?} should be {truth}");
@@ -1461,9 +1600,7 @@ mod probe {
                     above_one += 1;
                 }
             }
-            eprintln!(
-                "  {name:<22} brightest {highest:.4}, {above_one} pixels above 1.0",
-            );
+            eprintln!("  {name:<22} brightest {highest:.4}, {above_one} pixels above 1.0",);
         }
 
         // === 2. Sharpen each frame and then average, against average and then
@@ -1526,8 +1663,10 @@ mod probe {
         // brightest things in the room are clipped in every frame, so the
         // merge falls back to the shortest one's own reading, and that reading
         // has been flattened to 1.0. ===
-        eprintln!("
-=== what the two merges say, by level ===");
+        eprintln!(
+            "
+=== what the two merges say, by level ==="
+        );
         eprintln!(
             "{:>14} {:>14} {:>16} {:>16} {:>10}",
             "x", "pixels", "with the clamp", "without it", "higher by"
@@ -1609,7 +1748,12 @@ mod probe {
             eprintln!("RAPIDRAW_TEST_HDR_BRACKET unset, skipping");
             return;
         };
-        let path = list.split(';').next().unwrap_or_default().trim().to_string();
+        let path = list
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
 
         let mut on = AppSettings::default();
         on.raw_highlight_compression = Some(2.5);
@@ -1653,9 +1797,7 @@ mod probe {
         eprintln!(
             "pixels the merge believes:      {counted_below}, of which {moved_below} moved, worst {worst_below:.6}"
         );
-        eprintln!(
-            "pixels the merge already ignores: {moved_above} moved, worst {worst_above:.6}"
-        );
+        eprintln!("pixels the merge already ignores: {moved_above} moved, worst {worst_above:.6}");
         // And where they sit, because a spatial filter running after the
         // compression would move only the pixels beside a blown highlight,
         // while a curve would move them everywhere.
@@ -1675,7 +1817,10 @@ mod probe {
                 moved_by_level[bin] += 1;
             }
         }
-        eprintln!("{:>18} {:>14} {:>10}", "brightest channel", "pixels", "moved");
+        eprintln!(
+            "{:>18} {:>14} {:>10}",
+            "brightest channel", "pixels", "moved"
+        );
         for bin in 0..10 {
             if total_by_level[bin] == 0 {
                 continue;
@@ -1763,7 +1908,9 @@ mod probe {
         let lights = measured_lights(&frames);
 
         eprintln!("\n=== the bracket ===");
-        eprintln!("metered white is a radiance of {white:.5}, so x = radiance * {metered_light:.5}");
+        eprintln!(
+            "metered white is a radiance of {white:.5}, so x = radiance * {metered_light:.5}"
+        );
         eprintln!(
             "{:<24} {:>9} {:>6} {:>10} {:>10} {:>8} {:>16}",
             "frame", "shutter", "ISO", "labelled", "measured", "out by", "fades over x"
@@ -1791,8 +1938,11 @@ mod probe {
 
         let mut by_light: Vec<usize> = (0..frames.len()).collect();
         by_light.sort_by(|a, b| frames[*a].light().total_cmp(&frames[*b].light()));
-        eprintln!("
-{:>34} {:>10} {:>10} {:>16}", "pair", "labelled", "measured", "spread, stops");
+        eprintln!(
+            "
+{:>34} {:>10} {:>10} {:>16}",
+            "pair", "labelled", "measured", "spread, stops"
+        );
         for pair in by_light.windows(2) {
             let (dark, bright) = (pair[0], pair[1]);
             let short_name = |index: usize| {

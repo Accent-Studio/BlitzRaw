@@ -354,7 +354,7 @@ pub fn stacked_file_names(paths: &[String]) -> std::collections::HashSet<String>
         if file
             .stacks
             .values()
-            .any(|record| record.members().iter().any(|m| *m == name))
+            .any(|record| record.members().contains(&name))
         {
             out.insert(path.clone());
         }
@@ -462,8 +462,10 @@ pub fn clear_stacks(paths: Vec<String>) -> Result<usize, String> {
 /// merged stack read as one finished photograph.
 #[tauri::command]
 pub fn set_stack_leader(new_member_path: String, sibling_path: String) -> Result<(), String> {
-    let (Some(dir), Some(sibling_name)) = (parent_of(&sibling_path), file_name_of(source_of(&sibling_path)))
-    else {
+    let (Some(dir), Some(sibling_name)) = (
+        parent_of(&sibling_path),
+        file_name_of(source_of(&sibling_path)),
+    ) else {
         return Err("Could not resolve the stack from that file.".to_string());
     };
     let Some(new_name) = file_name_of(source_of(&new_member_path)) else {
@@ -602,7 +604,12 @@ mod tests {
     #[test]
     fn a_stack_round_trips_through_disk() {
         let dir = temp_dir("roundtrip");
-        set_stacks(vec![vec![p(&dir, "a.nef"), p(&dir, "b.nef"), p(&dir, "c.nef")]]).unwrap();
+        set_stacks(vec![vec![
+            p(&dir, "a.nef"),
+            p(&dir, "b.nef"),
+            p(&dir, "c.nef"),
+        ]])
+        .unwrap();
 
         let ids = stack_ids_by_file_name(&dir);
         assert_eq!(ids.len(), 3);
@@ -625,9 +632,19 @@ mod tests {
     #[test]
     fn a_frame_can_only_belong_to_one_stack() {
         let dir = temp_dir("exclusive");
-        set_stacks(vec![vec![p(&dir, "a.nef"), p(&dir, "b.nef"), p(&dir, "c.nef")]]).unwrap();
+        set_stacks(vec![vec![
+            p(&dir, "a.nef"),
+            p(&dir, "b.nef"),
+            p(&dir, "c.nef"),
+        ]])
+        .unwrap();
         // Re-stack b with different partners; it must leave the first stack.
-        set_stacks(vec![vec![p(&dir, "b.nef"), p(&dir, "d.nef"), p(&dir, "e.nef")]]).unwrap();
+        set_stacks(vec![vec![
+            p(&dir, "b.nef"),
+            p(&dir, "d.nef"),
+            p(&dir, "e.nef"),
+        ]])
+        .unwrap();
 
         let ids = stack_ids_by_file_name(&dir);
         assert_eq!(ids["b.nef"], ids["d.nef"]);
@@ -648,7 +665,12 @@ mod tests {
     #[test]
     fn clearing_every_stack_removes_the_file_entirely() {
         let dir = temp_dir("cleanup");
-        set_stacks(vec![vec![p(&dir, "a.nef"), p(&dir, "b.nef"), p(&dir, "c.nef")]]).unwrap();
+        set_stacks(vec![vec![
+            p(&dir, "a.nef"),
+            p(&dir, "b.nef"),
+            p(&dir, "c.nef"),
+        ]])
+        .unwrap();
         assert!(stack_file_path(&dir).exists());
 
         clear_stacks(vec![p(&dir, "a.nef"), p(&dir, "b.nef"), p(&dir, "c.nef")]).unwrap();
@@ -669,13 +691,21 @@ mod tests {
         set_stacks(vec![vec![format!("{a}?vc=abc123"), p(&dir, "b.nef")]]).unwrap();
 
         let ids = stack_ids_by_file_name(&dir);
-        assert!(ids.contains_key("a.nef"), "expected the source name, got {ids:?}");
+        assert!(
+            ids.contains_key("a.nef"),
+            "expected the source name, got {ids:?}"
+        );
     }
 
     #[test]
     fn a_merged_result_joins_the_stack_and_leads_it() {
         let dir = temp_dir("leader");
-        set_stacks(vec![vec![p(&dir, "a.nef"), p(&dir, "b.nef"), p(&dir, "c.nef")]]).unwrap();
+        set_stacks(vec![vec![
+            p(&dir, "a.nef"),
+            p(&dir, "b.nef"),
+            p(&dir, "c.nef"),
+        ]])
+        .unwrap();
 
         set_stack_leader(p(&dir, "a_Hdr.png"), p(&dir, "b.nef")).unwrap();
 
@@ -750,11 +780,20 @@ mod tests {
     #[test]
     fn renaming_every_member_at_once_keeps_the_stack_whole() {
         let dir = temp_dir("rename-all");
-        set_stacks(vec![vec![p(&dir, "a.nef"), p(&dir, "b.nef"), p(&dir, "c.nef")]]).unwrap();
+        set_stacks(vec![vec![
+            p(&dir, "a.nef"),
+            p(&dir, "b.nef"),
+            p(&dir, "c.nef"),
+        ]])
+        .unwrap();
 
         // What renaming a selected peer stack now does.
         let mut renames = HashMap::new();
-        for (old, new) in [("a.nef", "s_1.nef"), ("b.nef", "s_2.nef"), ("c.nef", "s_3.nef")] {
+        for (old, new) in [
+            ("a.nef", "s_1.nef"),
+            ("b.nef", "s_2.nef"),
+            ("c.nef", "s_3.nef"),
+        ] {
             renames.insert(p(&dir, old), p(&dir, new));
         }
         rename_members(&renames);
@@ -784,7 +823,10 @@ mod tests {
 
         assert_eq!(stacked.len(), 2);
         assert!(stacked.contains(&p(&dir, "a.nef")));
-        assert!(!stacked.contains(&p(&dir, "loose.nef")), "a free file was skipped");
+        assert!(
+            !stacked.contains(&p(&dir, "loose.nef")),
+            "a free file was skipped"
+        );
     }
 
     #[test]

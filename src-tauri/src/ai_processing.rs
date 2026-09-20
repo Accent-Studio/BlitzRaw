@@ -49,9 +49,9 @@ pub fn session_builder(what_for: &str) -> Result<SessionBuilder> {
         // DirectML wants one thing at a time and no memory pattern planning.
         // With both left on it either refuses the session or quietly produces
         // wrong pixels, and neither says which.
-        return Ok(builder
+        Ok(builder
             .with_memory_pattern(false)?
-            .with_execution_providers([provider.build()])?);
+            .with_execution_providers([provider.build()])?)
     }
 
     #[cfg(not(windows))]
@@ -122,9 +122,7 @@ mod directml_probe {
         let started = std::time::Instant::now();
         let built = Session::builder()
             .and_then(|b| b.with_memory_pattern(false))
-            .and_then(|b| {
-                b.with_execution_providers([provider.build().error_on_failure()])
-            })
+            .and_then(|b| b.with_execution_providers([provider.build().error_on_failure()]))
             .and_then(|b| b.commit_from_file(&model));
 
         match built {
@@ -193,8 +191,7 @@ const SCUNET_SHA256: &str = "231be201ab413dbc999d7951caa9844846b93a12a40a41e037d
 const SCUNET_DATA_URL: &str =
     "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx.data";
 const SCUNET_DATA_FILENAME: &str = "scunet_color_real_psnr.onnx.data";
-const SCUNET_DATA_SHA256: &str =
-    "98825ea1210b641c71e5f052f582c70c49fd44b35387ebe2c034268c17df3feb";
+const SCUNET_DATA_SHA256: &str = "98825ea1210b641c71e5f052f582c70c49fd44b35387ebe2c034268c17df3feb";
 
 /// The one tile size SCUNet is ever asked for, and it has to be one.
 ///
@@ -647,7 +644,9 @@ pub async fn get_or_init_scunet_model(
     .await?;
 
     let _ = ort::init().with_name("AI-SCUNet").commit();
-    let model = Arc::new(Mutex::new(scunet_session(&models_dir.join(SCUNET_FILENAME))?));
+    let model = Arc::new(Mutex::new(scunet_session(
+        &models_dir.join(SCUNET_FILENAME),
+    )?));
 
     crate::register_exit_handler();
 
@@ -717,8 +716,10 @@ pub fn scunet_denoise_inner(
         let src = rgb_img.as_raw();
         *p = Rgb([
             (src[i3] + (accumulator[i3].clamp(0.0, 1.0) - src[i3]) * mix).clamp(0.0, 1.0),
-            (src[i3 + 1] + (accumulator[i3 + 1].clamp(0.0, 1.0) - src[i3 + 1]) * mix).clamp(0.0, 1.0),
-            (src[i3 + 2] + (accumulator[i3 + 2].clamp(0.0, 1.0) - src[i3 + 2]) * mix).clamp(0.0, 1.0),
+            (src[i3 + 1] + (accumulator[i3 + 1].clamp(0.0, 1.0) - src[i3 + 1]) * mix)
+                .clamp(0.0, 1.0),
+            (src[i3 + 2] + (accumulator[i3 + 2].clamp(0.0, 1.0) - src[i3 + 2]) * mix)
+                .clamp(0.0, 1.0),
         ]);
     }
 

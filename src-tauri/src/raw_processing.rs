@@ -160,7 +160,11 @@ fn develop_internal(
     highlight_compression: f32,
     linear_mode: String,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
-) -> Result<(DynamicImage, Orientation, Option<crate::camera_profile::CameraProfile>)> {
+) -> Result<(
+    DynamicImage,
+    Orientation,
+    Option<crate::camera_profile::CameraProfile>,
+)> {
     let check_cancel = || -> Result<()> {
         if let Some((tracker, generation)) = &cancel_token
             && tracker.load(Ordering::SeqCst) != *generation

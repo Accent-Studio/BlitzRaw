@@ -61,6 +61,8 @@
       "tint": "Zabarwienie",
       "toggleSliders": "Przełącz suwaki",
       "vibrance": "Jaskrawość",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "Próbnik balansu bieli",
       "wbPickerWgpuDisabled": "Próbnik BB: Wyłącz WGPU w Ustawieniach.",
       "whiteBalance": "Balans bieli"

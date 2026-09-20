@@ -61,6 +61,8 @@
       "tint": "色调",
       "toggleSliders": "切换滑块",
       "vibrance": "鲜艳度",
+      "wbAsShot": "As Shot",
+      "wbResetAsShot": "Reset to As Shot",
       "wbPickerTooltip": "白平衡选取器",
       "wbPickerWgpuDisabled": "白平衡选取器：请在设置中禁用 WGPU。",
       "whiteBalance": "白平衡"

@@ -39,7 +39,10 @@ const DEGHOST_MAX_DISPLACEMENT_FRACTION: f64 = 0.1;
 /// The estimate is a pure rotation plus translation, so the upper-left block is
 /// orthonormal and the angle reads straight off it.
 fn rotation_degrees(transform: &Matrix3<f64>) -> f64 {
-    transform[(1, 0)].atan2(transform[(0, 0)]).to_degrees().abs()
+    transform[(1, 0)]
+        .atan2(transform[(0, 0)])
+        .to_degrees()
+        .abs()
 }
 
 /// Whether an estimated alignment is small enough to be a real camera movement
@@ -54,7 +57,8 @@ fn is_plausible_alignment(transform: &Matrix3<f64>, width: u32, height: u32) -> 
     }
 
     let diagonal = ((width as f64).powi(2) + (height as f64).powi(2)).sqrt();
-    max_corner_displacement(transform, width, height) <= diagonal * DEGHOST_MAX_DISPLACEMENT_FRACTION
+    max_corner_displacement(transform, width, height)
+        <= diagonal * DEGHOST_MAX_DISPLACEMENT_FRACTION
 }
 
 enum AlignmentOutcome {
@@ -386,7 +390,11 @@ mod alignment_guard_tests {
     #[test]
     fn a_small_correction_is_allowed() {
         // Handheld drift between bracket frames is well under a degree.
-        assert!(is_plausible_alignment(&rotation_about_origin(0.4), 8256, 5504));
+        assert!(is_plausible_alignment(
+            &rotation_about_origin(0.4),
+            8256,
+            5504
+        ));
         assert!(is_plausible_alignment(&translation(12.0, -8.0), 8256, 5504));
     }
 
@@ -403,7 +411,11 @@ mod alignment_guard_tests {
     #[test]
     fn a_wild_shift_is_refused_even_without_rotation() {
         // Half the frame across is a mismatch, not a camera that moved.
-        assert!(!is_plausible_alignment(&translation(4000.0, 0.0), 8256, 5504));
+        assert!(!is_plausible_alignment(
+            &translation(4000.0, 0.0),
+            8256,
+            5504
+        ));
     }
 
     #[test]
@@ -414,8 +426,16 @@ mod alignment_guard_tests {
 
     #[test]
     fn the_threshold_sits_where_it_claims_to() {
-        assert!(is_plausible_alignment(&rotation_about_origin(4.9), 8256, 5504));
-        assert!(!is_plausible_alignment(&rotation_about_origin(5.1), 8256, 5504));
+        assert!(is_plausible_alignment(
+            &rotation_about_origin(4.9),
+            8256,
+            5504
+        ));
+        assert!(!is_plausible_alignment(
+            &rotation_about_origin(5.1),
+            8256,
+            5504
+        ));
     }
 }
 

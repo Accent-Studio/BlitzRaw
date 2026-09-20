@@ -66,7 +66,9 @@ pub fn hdr_outputs_present(first_paths: Vec<String>) -> Vec<HdrOutputStatus> {
     first_paths
         .into_iter()
         .map(|first_path| {
-            let existing = candidate_outputs(&first_path).into_iter().find(|p| p.is_file());
+            let existing = candidate_outputs(&first_path)
+                .into_iter()
+                .find(|p| p.is_file());
             HdrOutputStatus {
                 first_path,
                 exists: existing.is_some(),
@@ -113,8 +115,14 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
 
-        assert!(names.contains(&"_DSC1794_Hdr.dng".to_string()), "a merge of raw frames");
-        assert!(names.contains(&"_DSC1794_Hdr.png".to_string()), "a merge of anything not float");
+        assert!(
+            names.contains(&"_DSC1794_Hdr.dng".to_string()),
+            "a merge of raw frames"
+        );
+        assert!(
+            names.contains(&"_DSC1794_Hdr.png".to_string()),
+            "a merge of anything not float"
+        );
         assert!(
             !names.contains(&"_DSC1794_Hdr.tiff".to_string()),
             "tiff is what merges used to be, and a stack holding only one has not been merged              into the format written today, so it must still be offered"
@@ -124,7 +132,11 @@ mod tests {
     #[test]
     fn candidates_sit_beside_the_source_frame() {
         let outputs = candidate_outputs(r"C:\shoot\RAW\_DSC1794.NEF");
-        assert!(outputs.iter().all(|p| p.parent() == Some(Path::new(r"C:\shoot\RAW"))));
+        assert!(
+            outputs
+                .iter()
+                .all(|p| p.parent() == Some(Path::new(r"C:\shoot\RAW")))
+        );
     }
 
     #[test]
