@@ -310,16 +310,20 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
     defaultCombo: ['ctrl', 'KeyV'],
     section: 'editing',
   },
+  // BLITZRAW: rotate and brush size moved to where Lightroom keeps them. Ctrl
+  // with the arrows belongs to the exposure and white balance nudges now (see
+  // quickAdjustments.ts), and a key can only do one thing, so brush size needed
+  // a new home; the brackets are the one Lightroom users already reach for.
   {
     action: 'rotate_left',
     description: 'settings.keybinds.actions.rotate_left',
-    defaultCombo: ['BracketLeft'],
+    defaultCombo: ['ctrl', 'BracketLeft'],
     section: 'editing',
   },
   {
     action: 'rotate_right',
     description: 'settings.keybinds.actions.rotate_right',
-    defaultCombo: ['BracketRight'],
+    defaultCombo: ['ctrl', 'BracketRight'],
     section: 'editing',
   },
   {
@@ -331,13 +335,13 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
   {
     action: 'brush_size_up',
     description: 'settings.keybinds.actions.brush_size_up',
-    defaultCombo: ['ctrl', 'ArrowUp'],
+    defaultCombo: ['BracketRight'],
     section: 'editing',
   },
   {
     action: 'brush_size_down',
     description: 'settings.keybinds.actions.brush_size_down',
-    defaultCombo: ['ctrl', 'ArrowDown'],
+    defaultCombo: ['BracketLeft'],
     section: 'editing',
   },
 ];

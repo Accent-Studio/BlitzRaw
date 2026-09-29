@@ -14,8 +14,14 @@ import { KeybindDefinition } from './keyboardUtils';
  * an adjustment is described by a path rather than a case in a switch: the same
  * nudge has to work for a control nobody thought about in advance.
  *
- * No default keys. Which finger does what is a personal matter and guessing
- * would only collide with something already bound.
+ * The three that ship come with keys, so a new install can nudge from the first
+ * minute: Ctrl with up and down for exposure, Ctrl with left and right for white
+ * balance, Shift with left and right to straighten. Anything added from a slider
+ * starts with none, since there is no way to guess what is free for it.
+ *
+ * The step each press moves can be changed in Settings. The override lives in
+ * the settings as `quickAdjustmentSteps`, by id, and is applied here, so the
+ * keyboard and the list in Settings always agree on it.
  */
 
 export interface QuickAdjustment {
@@ -30,6 +36,10 @@ export interface QuickAdjustment {
   labelKey?: string;
   /** Literal label, for one added from a slider. */
   label?: string;
+  /** Translation key naming the step in Settings, for the three that ship. */
+  stepLabelKey?: string;
+  /** Keys it comes with, for the three that ship. */
+  keys?: { up: Array<string>; down: Array<string> };
 }
 
 export const BUILT_IN_QUICK_ADJUSTMENTS: Array<QuickAdjustment> = [
@@ -40,6 +50,8 @@ export const BUILT_IN_QUICK_ADJUSTMENTS: Array<QuickAdjustment> = [
     min: -5,
     max: 5,
     labelKey: 'settings.keybinds.actions.quick_exposure',
+    stepLabelKey: 'settings.keybinds.quickSteps.exposure',
+    keys: { up: ['ctrl', 'ArrowUp'], down: ['ctrl', 'ArrowDown'] },
   },
   {
     id: 'temperature',
@@ -51,6 +63,8 @@ export const BUILT_IN_QUICK_ADJUSTMENTS: Array<QuickAdjustment> = [
     min: 1667,
     max: 50000,
     labelKey: 'settings.keybinds.actions.quick_temperature',
+    stepLabelKey: 'settings.keybinds.quickSteps.temperature',
+    keys: { up: ['ctrl', 'ArrowRight'], down: ['ctrl', 'ArrowLeft'] },
   },
   {
     id: 'rotation',
@@ -59,6 +73,8 @@ export const BUILT_IN_QUICK_ADJUSTMENTS: Array<QuickAdjustment> = [
     min: -45,
     max: 45,
     labelKey: 'settings.keybinds.actions.quick_rotation',
+    stepLabelKey: 'settings.keybinds.quickSteps.rotation',
+    keys: { up: ['shift', 'ArrowRight'], down: ['shift', 'ArrowLeft'] },
   },
 ];
 
@@ -67,12 +83,47 @@ export function quickActionName(id: string, direction: 'up' | 'down'): string {
   return `quick_${id}_${direction}`;
 }
 
-/** Everything on the list, the three built in plus whatever was added. */
-export function allQuickAdjustments(custom?: Array<QuickAdjustment> | null): Array<QuickAdjustment> {
+/**
+ * Whether a step typed in Settings can be used: more than nothing, and no more
+ * than the whole range, since a step past that could only ever hit a limit.
+ */
+export function isUsableStep(item: QuickAdjustment, step: number): boolean {
+  return Number.isFinite(step) && step > 0 && step <= item.max - item.min;
+}
+
+/**
+ * Everything on the list, the three built in plus whatever was added, each
+ * with the step chosen in Settings when there is a usable one.
+ */
+export function allQuickAdjustments(
+  custom?: Array<QuickAdjustment> | null,
+  steps?: { [id: string]: number } | null,
+): Array<QuickAdjustment> {
   const extra = (custom ?? []).filter(
     (item) => item && item.id && !BUILT_IN_QUICK_ADJUSTMENTS.some((builtIn) => builtIn.id === item.id),
   );
-  return [...BUILT_IN_QUICK_ADJUSTMENTS, ...extra];
+  return [...BUILT_IN_QUICK_ADJUSTMENTS, ...extra].map((item) => {
+    const chosen = steps?.[item.id];
+    return typeof chosen === 'number' && isUsableStep(item, chosen) ? { ...item, step: chosen } : item;
+  });
+}
+
+/** The two keybind rows for one adjustment, one each way. */
+export function quickKeybindDefinitionsFor(item: QuickAdjustment): Array<KeybindDefinition> {
+  return [
+    {
+      action: quickActionName(item.id, 'up'),
+      description: item.labelKey ? `${item.labelKey}_up` : `+ ${item.label ?? item.id}`,
+      defaultCombo: item.keys?.up ?? [],
+      section: 'quick' as const,
+    },
+    {
+      action: quickActionName(item.id, 'down'),
+      description: item.labelKey ? `${item.labelKey}_down` : `- ${item.label ?? item.id}`,
+      defaultCombo: item.keys?.down ?? [],
+      section: 'quick' as const,
+    },
+  ];
 }
 
 /**
@@ -80,20 +131,7 @@ export function allQuickAdjustments(custom?: Array<QuickAdjustment> | null): Arr
  * beside everything else rather than in a list of their own.
  */
 export function quickKeybindDefinitions(custom?: Array<QuickAdjustment> | null): Array<KeybindDefinition> {
-  return allQuickAdjustments(custom).flatMap((item) => [
-    {
-      action: quickActionName(item.id, 'up'),
-      description: item.labelKey ? `${item.labelKey}_up` : `+ ${item.label ?? item.id}`,
-      defaultCombo: [],
-      section: 'quick' as const,
-    },
-    {
-      action: quickActionName(item.id, 'down'),
-      description: item.labelKey ? `${item.labelKey}_down` : `- ${item.label ?? item.id}`,
-      defaultCombo: [],
-      section: 'quick' as const,
-    },
-  ]);
+  return allQuickAdjustments(custom).flatMap(quickKeybindDefinitionsFor);
 }
 
 function readPath(source: any, path: string): unknown {

@@ -273,6 +273,11 @@ export interface AppSettings {
    */
   quickAdjustments?: Array<{ id: string; path: string; step: number; min: number; max: number; label?: string }>;
   /**
+   * How far one press of each quick adjustment moves, by id, when it was
+   * changed in Settings. Absent means the step it came with.
+   */
+  quickAdjustmentSteps?: { [id: string]: number };
+  /**
    * Which sections of the Adjustments panel are left open. A preference about
    * the panel, not about a photo, so it is kept here rather than in a sidecar.
    */

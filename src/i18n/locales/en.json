@@ -224,6 +224,7 @@
       "removeRoot": "Remove Root Folder",
       "renameFolder": "Rename Folder",
       "showExplorer": "Show in File Explorer",
+      "showFinder": "Show in Finder",
       "unpin": "Unpin Folder"
     },
     "library": {
@@ -287,6 +288,7 @@
       "resetAdjustments_one": "Reset Adjustments",
       "resetAdjustments_other": "Reset Adjustments on {{count}} Images",
       "showExplorer": "Show in File Explorer",
+      "showFinder": "Show in Finder",
       "stackImages_one": "Stack",
       "stackImages_other": "Stack {{count}} Images",
       "stacksMenu": "Stacks",
@@ -1523,7 +1525,7 @@
     "data": {
       "clearSidecars": "Clear All Sidecar Files",
       "clearSidecarsButton": "Clear",
-      "clearSidecarsDesc": "This moves every .rrdata and .rrexif file to the Recycle Bin. Those hold your edits, ratings and labels for every photo inside your root folders:",
+      "clearSidecarsDesc": "This moves every .rrdata and .rrexif file to the Recycle Bin, or the Trash on a Mac. Those hold your edits, ratings and labels for every photo inside your root folders:",
       "clearThumbnail": "Clear Thumbnail Cache",
       "clearThumbnailButton": "Clear",
       "clearThumbnailDesc": "This will delete all cached thumbnail images. They will be regenerated automatically as you browse your library.",
@@ -1544,7 +1546,7 @@
         "confirmClearCache": "Clear Cache",
         "confirmDeleteAllEdits": "Delete All Edits",
         "confirmTitle": "Confirm Deletion",
-        "sidecarMessage": "This deletes every edit, rating and label for every photo inside all of your root folders and their subfolders.\n\nThe files go to the Recycle Bin, so this can be undone from there, but only until the bin is emptied.",
+        "sidecarMessage": "This deletes every edit, rating and label for every photo inside all of your root folders and their subfolders.\n\nThe files go to the Recycle Bin, or the Trash on a Mac, so this can be undone from there, but only until it is emptied.",
         "sidecarPhrase": "delete"
       },
       "noFolders": "No folders selected",
@@ -1612,13 +1614,19 @@
       "addToQuick": "Add to Quick Adjustments",
       "alreadyQuick": "Already in Quick Adjustments",
       "addedToQuick": "{{name}} added to Quick Adjustments. Assign a key in Settings.",
+      "quickSteps": {
+        "exposure": "Exposure step (stops)",
+        "temperature": "White balance step (K)",
+        "rotation": "Straighten step (degrees)",
+        "custom": "{{name}} step"
+      },
       "actions": {
-        "quick_exposure_up": "Exposure up (0.1 stop)",
-        "quick_exposure_down": "Exposure down (0.1 stop)",
-        "quick_temperature_up": "White balance warmer (50K)",
-        "quick_temperature_down": "White balance cooler (50K)",
-        "quick_rotation_up": "Rotate right (0.1 degree)",
-        "quick_rotation_down": "Rotate left (0.1 degree)",
+        "quick_exposure_up": "Exposure up",
+        "quick_exposure_down": "Exposure down",
+        "quick_temperature_up": "White balance warmer",
+        "quick_temperature_down": "White balance cooler",
+        "quick_rotation_up": "Straighten right",
+        "quick_rotation_down": "Straighten left",
         "brush_size_down": "Decrease brush size",
         "brush_size_up": "Increase brush size",
         "color_label_blue": "Color label: Blue",

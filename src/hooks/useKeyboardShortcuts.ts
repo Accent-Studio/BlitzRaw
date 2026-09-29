@@ -95,14 +95,25 @@ export const useKeyboardShortcuts = ({
     const keybinds = useSettingsStore.getState().appSettings?.keybinds;
 
     const customQuick = useSettingsStore.getState().appSettings?.quickAdjustments;
+    const quickSteps = useSettingsStore.getState().appSettings?.quickAdjustmentSteps;
     const quickDefs = quickKeybindDefinitions(customQuick);
 
     for (const def of [...KEYBIND_DEFINITIONS, ...quickDefs]) {
       const userCombo = keybinds?.[def.action];
-      const effective = userCombo && userCombo.length > 0 ? userCombo : def.defaultCombo;
+      // BLITZRAW: an empty combo is a key cleared in Settings, which shows it as
+      // "Not assigned". Falling back to the default here kept the cleared key
+      // working, so a default could never be unbound.
+      const effective = userCombo !== undefined ? userCombo : def.defaultCombo;
       if (effective && effective.length > 0) {
         comboMap.set(effective.join('+'), def.action);
       }
+    }
+
+    // BLITZRAW: Shift + Cmd + Z is redo in every Mac app, and Shift + Ctrl + Z
+    // in many Windows ones. It works as a second key for redo, unless redo has
+    // been unbound or that combination is bound to something else.
+    if ([...comboMap.values()].includes('redo') && !comboMap.has('ctrl+shift+KeyZ')) {
+      comboMap.set('ctrl+shift+KeyZ', 'redo');
     }
 
     const getImagePathsForCopy = (s: any): Array<string> => {
@@ -899,7 +910,7 @@ export const useKeyboardShortcuts = ({
     // Two entries per quick adjustment, built from the same list Settings
     // shows, so anything added from a slider is bindable without another
     // switch statement to keep in step.
-    for (const item of allQuickAdjustments(customQuick)) {
+    for (const item of allQuickAdjustments(customQuick, quickSteps)) {
       for (const direction of ['up', 'down'] as const) {
         actions[quickActionName(item.id, direction)] = {
           shouldFire: (s: any) => {

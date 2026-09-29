@@ -41,7 +41,13 @@ import {
   KEYBIND_SECTIONS,
   normalizeCombo,
 } from '../../utils/keyboardUtils';
-import { quickKeybindDefinitions } from '../../utils/quickAdjustments';
+import {
+  QuickAdjustment,
+  allQuickAdjustments,
+  isUsableStep,
+  quickKeybindDefinitions,
+  quickKeybindDefinitionsFor,
+} from '../../utils/quickAdjustments';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useOsPlatform } from '../../hooks/useOsPlatform';
@@ -206,6 +212,56 @@ const KeybindRow = ({
           )}
         </button>
       </div>
+    </div>
+  );
+};
+
+// BLITZRAW: how far one press of a quick adjustment moves. Typed as text and
+// kept only when it is usable, on leaving the field or on Enter, so a half-typed
+// "0." never reaches the keyboard. Emptying the field goes back to the step the
+// adjustment came with.
+const QuickStepField = ({
+  item,
+  current,
+  onCommit,
+}: {
+  item: QuickAdjustment;
+  current: number;
+  onCommit(id: string, step: number | null): void;
+}) => {
+  const { t } = useTranslation();
+  const [text, setText] = useState(String(current));
+  useEffect(() => setText(String(current)), [current]);
+
+  const commit = () => {
+    if (text.trim() === '') {
+      onCommit(item.id, null);
+      return;
+    }
+    const value = Number(text.replace(',', '.'));
+    if (isUsableStep(item, value)) {
+      onCommit(item.id, value);
+    } else {
+      setText(String(current));
+    }
+  };
+
+  const label = item.stepLabelKey
+    ? t(item.stepLabelKey as any)
+    : t('settings.keybinds.quickSteps.custom' as any, { name: item.label ?? item.id });
+
+  return (
+    <div className="flex justify-between items-center py-2">
+      <Text variant={TextVariants.label}>{label}</Text>
+      <Input
+        className="w-24 h-8 text-right"
+        value={text}
+        onChange={(e: any) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e: any) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+        }}
+      />
     </div>
   );
 };
@@ -992,13 +1048,29 @@ export default function SettingsPanel({
     onSettingsChange({ ...appSettings, keybinds: newKeybinds });
   };
 
+  // BLITZRAW: a step equal to the one the adjustment came with is not stored,
+  // so changing the built-in step later still reaches everyone who never
+  // touched it.
+  const handleQuickStepSave = (id: string, step: number | null) => {
+    const steps = { ...(appSettings?.quickAdjustmentSteps || {}) };
+    const original = allQuickAdjustments(appSettings?.quickAdjustments).find((item) => item.id === id)?.step;
+    if (step === null || step === original) {
+      delete steps[id];
+    } else {
+      steps[id] = step;
+    }
+    onSettingsChange({ ...appSettings, quickAdjustmentSteps: steps });
+  };
+
   const conflictingKeys = useMemo(() => {
     const map = new Map<string, Set<string>>();
     const userKb = appSettings?.keybinds || {};
-    for (const def of KEYBIND_DEFINITIONS) {
+    // BLITZRAW: the quick adjustments too, since they share the keyboard with
+    // everything else and the one registered last silently wins a shared key.
+    for (const def of [...KEYBIND_DEFINITIONS, ...quickKeybindDefinitions(appSettings?.quickAdjustments)]) {
       const userCombo = userKb[def.action];
       const effective = userCombo?.length ? userCombo : userCombo === undefined ? def.defaultCombo : null;
-      if (!effective) continue;
+      if (!effective || effective.length === 0) continue;
       const key = effective.join('+');
       if (!map.has(key)) map.set(key, new Set());
       map.get(key)!.add(def.action);
@@ -1008,7 +1080,7 @@ export default function SettingsPanel({
       if (actions.size > 1) actions.forEach((k) => keys.add(k));
     }
     return keys;
-  }, [appSettings?.keybinds]);
+  }, [appSettings?.keybinds, appSettings?.quickAdjustments]);
 
   return (
     <>
@@ -2569,22 +2641,37 @@ export default function SettingsPanel({
                             ? quickKeybindDefinitions(appSettings?.quickAdjustments)
                             : KEYBIND_DEFINITIONS.filter((d) => d.section === section.id);
                         const userKb = appSettings?.keybinds || {};
+                        const keybindRow = (def: KeybindDefinition) => (
+                          <KeybindRow
+                            key={def.action}
+                            def={def}
+                            currentCombo={userKb[def.action]}
+                            osPlatform={osPlatform}
+                            onSave={handleKeybindSave}
+                            recordingAction={recordingAction}
+                            onStartRecording={setRecordingAction}
+                            isConflicting={conflictingKeys.has(def.action)}
+                          />
+                        );
                         return (
                           <div key={section.id}>
                             <Text variant={TextVariants.heading}>{t(section.label as any)}</Text>
                             <div className="divide-y divide-border-color">
-                              {sectionDefs.map((def) => (
-                                <KeybindRow
-                                  key={def.action}
-                                  def={def}
-                                  currentCombo={userKb[def.action]}
-                                  osPlatform={osPlatform}
-                                  onSave={handleKeybindSave}
-                                  recordingAction={recordingAction}
-                                  onStartRecording={setRecordingAction}
-                                  isConflicting={conflictingKeys.has(def.action)}
-                                />
-                              ))}
+                              {section.id === 'quick'
+                                ? // BLITZRAW: one group per quick adjustment: how far a
+                                  // press moves, then its two keys.
+                                  allQuickAdjustments(appSettings?.quickAdjustments).map((item) => {
+                                    const chosen = appSettings?.quickAdjustmentSteps?.[item.id];
+                                    const current =
+                                      typeof chosen === 'number' && isUsableStep(item, chosen) ? chosen : item.step;
+                                    return (
+                                      <div key={item.id}>
+                                        <QuickStepField item={item} current={current} onCommit={handleQuickStepSave} />
+                                        {quickKeybindDefinitionsFor(item).map(keybindRow)}
+                                      </div>
+                                    );
+                                  })
+                                : sectionDefs.map(keybindRow)}
                             </div>
                           </div>
                         );
