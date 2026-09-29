@@ -34,7 +34,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "publisher": "Accent Studio",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "resources": ["resources", "lensfun_db"],
     "category": "Photography",
@@ -90,9 +91,10 @@
     ],
     "windows": {
       "nsis": {
+        "installMode": "currentUser",
         "installerIcon": "icons/icon.ico"
       }
     }
   },
-  "version": "1.6.1"
+  "version": "0.9.9"
 }
