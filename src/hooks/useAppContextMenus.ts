@@ -1056,7 +1056,12 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         {
           disabled: !isSingleSelection,
           icon: Folder,
-          label: t('contextMenus.thumbnail.showExplorer'),
+          // BLITZRAW: a Mac calls it Finder.
+          label: t(
+            useSettingsStore.getState().osPlatform === 'macos'
+              ? 'contextMenus.thumbnail.showFinder'
+              : 'contextMenus.thumbnail.showExplorer',
+          ),
           onClick: () => {
             invoke(Invokes.ShowInFinder, { path: finalSelection[0] }).catch((err) =>
               toast.error(t('contextMenus.toasts.couldNotShowExplorer', { err })),
@@ -1268,7 +1273,12 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         { type: OPTION_SEPARATOR },
         {
           icon: Folder,
-          label: t('contextMenus.folders.showExplorer'),
+          // BLITZRAW: a Mac calls it Finder.
+          label: t(
+            useSettingsStore.getState().osPlatform === 'macos'
+              ? 'contextMenus.folders.showFinder'
+              : 'contextMenus.folders.showExplorer',
+          ),
           onClick: () =>
             invoke(Invokes.ShowInFinder, { path: targetPath }).catch((err) =>
               toast.error(t('contextMenus.toasts.couldNotShowFolder', { err })),

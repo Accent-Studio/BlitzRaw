@@ -61,7 +61,8 @@ pub fn session_builder(what_for: &str) -> Result<SessionBuilder> {
     }
 }
 // ============ BLITZRAW: proof that the card is really doing it ============
-#[cfg(test)]
+// DirectML and the runtime this loads exist on Windows only.
+#[cfg(all(test, windows))]
 mod directml_probe {
     //! Whether the graphics card is actually taken up, rather than asked for
     //! and quietly refused.

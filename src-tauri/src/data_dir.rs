@@ -132,6 +132,35 @@ fn choose(app_handle: &AppHandle) -> PathBuf {
     chosen
 }
 
+/// Where a portable data folder would sit: beside the program.
+///
+/// On a Mac, beside the app rather than inside it. A folder inside the app
+/// would break its signature, and a new version, which replaces the whole
+/// app, would throw it away with the old one.
+fn portable_home(exe: &std::path::Path) -> Option<PathBuf> {
+    if cfg!(target_os = "macos")
+        && let Some(app) = app_bundle_of(exe)
+    {
+        return app.parent().map(|parent| parent.to_path_buf());
+    }
+    exe.parent().map(|parent| parent.to_path_buf())
+}
+
+/// The app an executable sits in: `/Applications/BlitzRaw.app` for
+/// `/Applications/BlitzRaw.app/Contents/MacOS/BlitzRaw`. None for a bare
+/// program, such as a development build.
+fn app_bundle_of(executable: &std::path::Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let shaped = macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app"));
+    shaped.then(|| bundle.to_path_buf())
+}
+
 fn choose_and_describe(app_handle: &AppHandle, report: &mut Vec<(log::Level, String)>) -> PathBuf {
     let roaming = app_handle.path().app_data_dir().ok();
     let local = app_handle.path().app_local_data_dir().ok();
@@ -148,7 +177,7 @@ fn choose_and_describe(app_handle: &AppHandle, report: &mut Vec<(log::Level, Str
     // Making it is how a portable install is asked for; nothing here creates it,
     // so a normal install never quietly becomes a portable one.
     if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
+        && let Some(dir) = portable_home(&exe)
     {
         let portable = dir.join(PORTABLE_FOLDER);
         if portable.is_dir() {

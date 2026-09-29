@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>BlitzRaw opens and edits the photos on the disks and cards you choose.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>BlitzRaw opens and edits the photos on the network drives you choose.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>BlitzRaw opens and edits the photos in the folders you choose.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>BlitzRaw opens and edits the photos in the folders you choose.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>BlitzRaw opens and edits the photos in the folders you choose.</string>
+</dict>
+</plist>

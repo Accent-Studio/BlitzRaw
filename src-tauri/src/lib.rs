@@ -2356,6 +2356,16 @@ fn frontend_ready(
         } else {
             log::info!("Window restore skipped: frontend_ready has already run this session");
         }
+        // BLITZRAW: a Mac restores only the size and the place, which setup has
+        // already done, so the window is where it was left as soon as it shows.
+        // Without this nothing ever marked it restored, and the saver never
+        // wrote the window's place down at all.
+        #[cfg(target_os = "macos")]
+        if is_first_run {
+            state
+                .window_state_restored
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     let open_with_file = state.initial_file_path.lock().unwrap().take();

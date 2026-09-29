@@ -82,6 +82,16 @@ pub fn hdr_outputs_present(first_paths: Vec<String>) -> Vec<HdrOutputStatus> {
 mod tests {
     use super::*;
 
+    /// The shoot folder the naming tests use, spelled the way this system
+    /// spells a path. A Windows path on a Mac is one long file name.
+    fn shoot_folder() -> &'static Path {
+        Path::new(if cfg!(windows) { r"C:\shoot\RAW" } else { "/shoot/RAW" })
+    }
+
+    fn in_shoot(name: &str) -> String {
+        shoot_folder().join(name).to_string_lossy().into_owned()
+    }
+
     #[test]
     fn a_shoot_merged_before_the_dng_change_is_offered_again() {
         let dir = std::env::temp_dir().join("blitzraw-bulk-hdr-legacy");
@@ -109,7 +119,7 @@ mod tests {
 
     #[test]
     fn candidates_follow_the_naming_save_hdr_uses() {
-        let outputs = candidate_outputs(r"C:\shoot\RAW\_DSC1794.NEF");
+        let outputs = candidate_outputs(&in_shoot("_DSC1794.NEF"));
         let names: Vec<String> = outputs
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -131,17 +141,14 @@ mod tests {
 
     #[test]
     fn candidates_sit_beside_the_source_frame() {
-        let outputs = candidate_outputs(r"C:\shoot\RAW\_DSC1794.NEF");
-        assert!(
-            outputs
-                .iter()
-                .all(|p| p.parent() == Some(Path::new(r"C:\shoot\RAW")))
-        );
+        let outputs = candidate_outputs(&in_shoot("_DSC1794.NEF"));
+        assert!(!outputs.is_empty());
+        assert!(outputs.iter().all(|p| p.parent() == Some(shoot_folder())));
     }
 
     #[test]
     fn a_virtual_copy_resolves_to_the_file_it_copies() {
-        let outputs = candidate_outputs(r"C:\shoot\RAW\_DSC1794.NEF?vc=abc123");
+        let outputs = candidate_outputs(&format!("{}?vc=abc123", in_shoot("_DSC1794.NEF")));
         let names: Vec<String> = outputs
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -152,7 +159,7 @@ mod tests {
 
     #[test]
     fn a_dotted_stem_is_kept_whole() {
-        let outputs = candidate_outputs(r"C:\shoot\RAW\shoot.02.raw.NEF");
+        let outputs = candidate_outputs(&in_shoot("shoot.02.raw.NEF"));
         let names: Vec<String> = outputs
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())

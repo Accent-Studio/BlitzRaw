@@ -92,6 +92,18 @@ pub fn is_raw_file<P: AsRef<Path>>(path: P) -> bool {
 pub fn is_supported_image_file<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
 
+    // BLITZRAW: a Mac writes a `._` file beside every file it copies to a card,
+    // a Windows disk or a network share, holding Finder's extra data. A
+    // `._DSC_1234.NEF` ends like a RAW and is four kilobytes of something else,
+    // so without this it shows in the library as a photo that will not open.
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("._"))
+    {
+        return false;
+    }
+
     let ext = match path.extension().and_then(|s| s.to_str()) {
         Some(e) => e,
         None => return false,

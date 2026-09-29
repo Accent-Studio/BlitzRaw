@@ -195,7 +195,7 @@ pub fn screen_for_panels(
 // ========== BLITZRAW END: the panels go to the other screen ==========
 
 /// Every monitor's work area, in the order the system lists them.
-fn every_work_area(window: &tauri::WebviewWindow) -> Vec<(i32, i32, u32, u32)> {
+pub(crate) fn every_work_area(window: &tauri::WebviewWindow) -> Vec<(i32, i32, u32, u32)> {
     window
         .available_monitors()
         .map(|monitors| {

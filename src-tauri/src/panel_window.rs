@@ -472,6 +472,7 @@ pub fn shown_place(window: &tauri::WebviewWindow) -> Option<PanelWindowPlace> {
 /// So it is not guessed. Ask, look at what happened, and add the difference to
 /// the next ask. One pass is enough for an offset that does not itself depend
 /// on the size, which a window frame does not.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn corrected(requested: i32, wanted: i32, actual: i32) -> i32 {
     requested + (wanted - actual)
 }
@@ -487,6 +488,34 @@ fn corrected(requested: i32, wanted: i32, actual: i32) -> i32 {
 /// as the window opens, before the webview has painted anything, so the extra
 /// call costs nothing anybody can see.
 pub fn place_exactly(window: &tauri::WebviewWindow, wanted: PanelWindowPlace) {
+    #[cfg(target_os = "macos")]
+    place_once(window, wanted);
+    #[cfg(not(target_os = "macos"))]
+    place_by_asking(window, wanted);
+}
+
+/// A Mac window is exactly the size it is asked for, since it has no invisible
+/// frame. And macOS applies the change after the call returns, so reading the
+/// window back straight away still sees the old frame, and a "correction"
+/// would push it past the target. One ask of each is exact.
+#[cfg(target_os = "macos")]
+fn place_once(window: &tauri::WebviewWindow, wanted: PanelWindowPlace) {
+    let _ = window.set_size(tauri::PhysicalSize::new(
+        wanted.width.max(1),
+        wanted.height.max(1),
+    ));
+    let _ = window.set_position(tauri::PhysicalPosition::new(wanted.x, wanted.y));
+    log::info!(
+        "The floating window was asked for {},{} sized {}x{}",
+        wanted.x,
+        wanted.y,
+        wanted.width,
+        wanted.height
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+fn place_by_asking(window: &tauri::WebviewWindow, wanted: PanelWindowPlace) {
     let mut width = wanted.width as i32;
     let mut height = wanted.height as i32;
 
@@ -564,9 +593,23 @@ pub fn work_area_for(window: &tauri::WebviewWindow) -> Option<(i32, i32, u32, u3
 /// is worth asking. Then the place is fitted to that monitor's work area and
 /// applied exactly. See `fit_place_to_area` and `place_exactly`.
 pub fn move_window_to(window: &tauri::WebviewWindow, place: PanelWindowPlace) {
-    let _ = window.set_position(tauri::PhysicalPosition::new(place.x, place.y));
+    #[cfg(not(target_os = "macos"))]
+    let area = {
+        let _ = window.set_position(tauri::PhysicalPosition::new(place.x, place.y));
+        work_area_for(window)
+    };
+    // BLITZRAW: a Mac moves a window after the call returns, so right after a
+    // move it still names the old screen. There the screen is the one that
+    // holds most of the place itself.
+    #[cfg(target_os = "macos")]
+    let area = {
+        let areas = crate::window_places::every_work_area(window);
+        crate::window_places::screen_holding(place, &areas)
+            .map(|index| areas[index])
+            .or_else(|| work_area_for(window))
+    };
 
-    let fitted = match work_area_for(window) {
+    let fitted = match area {
         Some((x, y, width, height)) => fit_place_to_area(place, x, y, width, height),
         None => place,
     };

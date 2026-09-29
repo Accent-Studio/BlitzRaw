@@ -230,7 +230,14 @@ export default function LibraryGrid(props: any) {
     return () => gridObserverRef.current?.disconnect();
   }, [libraryContainerRef]);
 
+  // BLITZRAW: a Mac trackpad or a pinch sends dozens of small wheel events for
+  // one gesture, where a mouse sends one per notch. On a Mac they are added up
+  // and the size moves once per notch's worth, or one flick would race from
+  // the smallest size to the largest and keep going after the fingers lift.
+  const wheelTotalRef = useRef(0);
+
   useEffect(() => {
+    const WHEEL_NOTCH_PIXELS = 100;
     const handleWheel = (event: any) => {
       const container = libraryContainerRef.current;
       if (!container || !container.contains(event.target)) {
@@ -240,12 +247,19 @@ export default function LibraryGrid(props: any) {
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
         // One step of the slider per notch, rather than one of three sizes.
+        let steps = event.deltaY < 0 ? 1 : -1;
+        if (useSettingsStore.getState().osPlatform === 'macos') {
+          wheelTotalRef.current += event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+          const notches = Math.trunc(wheelTotalRef.current / WHEEL_NOTCH_PIXELS);
+          if (notches === 0) {
+            return;
+          }
+          wheelTotalRef.current -= notches * WHEEL_NOTCH_PIXELS;
+          steps = -notches;
+        }
         const next = Math.min(
           THUMBNAIL_SIZE_MAX,
-          Math.max(
-            THUMBNAIL_SIZE_MIN,
-            thumbnailSize + (event.deltaY < 0 ? THUMBNAIL_SIZE_STEP : -THUMBNAIL_SIZE_STEP),
-          ),
+          Math.max(THUMBNAIL_SIZE_MIN, thumbnailSize + steps * THUMBNAIL_SIZE_STEP),
         );
         if (next !== thumbnailSize) {
           onThumbnailSizeChange(next);
