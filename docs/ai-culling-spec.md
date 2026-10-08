@@ -435,6 +435,23 @@ A separate local server, configured by URL:
 
 All three speak OpenAI-style `POST /v1/chat/completions`, with images as `data:image/jpeg;base64,…` URLs. BlitzRaw does not embed an LLM runtime.
 
+**If Ollama doesn't support a model** (or doesn't support several images per request with it):
+
+- try `llama-server` from llama.cpp directly; Ollama often lags behind llama.cpp on new vision models;
+- or use **vLLM** under WSL2, which runs Hugging Face checkpoints directly and usually supports new Qwen releases first; on 16 GB use an AWQ or FP8 quantised build.
+
+Both speak the same API, so `vlm.rs` doesn't change; only the base URL does.
+
+**ComfyUI is deliberately not a backend.**
+
+- The orchestration lives in `vlm.rs`: groups of varying size, tournaments, JSON validation and retries, the two-pass bias check, and caching. ComfyUI graphs are per-run DAGs with no native loops or branches, so that logic would stay in Rust anyway.
+- ComfyUI would add a second, fragile client: upload each image, patch node ids into an API-format workflow, poll `/history`, then dig the text out of an output node.
+- Its VLM support comes from community custom nodes that rarely offer schema-constrained output and tend to break across updates.
+
+ComfyUI is fine as a scratchpad for trying prompts on a handful of images. The numbers that decide anything come from `cull_eval eval` against your ratings.
+
+Note: the existing "AI connector" setting (`ai_connector_address`, serde alias `comfyuiAddress`, default port 8188) talks to a RapidRAW inpainting middleware (`/inpaint`, `/health`), not to ComfyUI's own API. It is not reusable here.
+
 **Model bake-off on your 16 GB card.** Pick by agreement with your picks on the held-out shoots, then by speed:
 
 | Candidate                                  | Approx. VRAM (Q4_K_M → Q8_0)   | Notes                                                                          |
