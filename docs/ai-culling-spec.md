@@ -24,6 +24,22 @@ The technical filter alone will **not** take 1000 frames to 300. In a working pr
 _redundancy_: eight good frames of the same toast. So stage 1 is "technically OK **and** among the best
 K of its moment". Grouping is what makes the 1000 → 300 step work, and it is why grouping is built first.
 
+### Your setup (answers that shape this spec)
+
+- **Windows**, 16 GB GPU. The ONNX models run on DirectML, which is already bundled (`build.rs` fetches the DirectML build of onnxruntime on Windows).
+- **What your stars mean:**
+
+  | Rating | Meaning                                            | Matches stage                               |
+  | ------ | -------------------------------------------------- | ------------------------------------------- |
+  | 0      | not kept on the first pass                         | rejected or surplus                         |
+  | ★      | first pass: a usable frame                         | stage 1 output, the ~300 candidates         |
+  | ★★     | second pass: final pick, gets edited and delivered | stage 2 output, the ~100–150 picks          |
+  | ★★★+   | portfolio-worthy                                   | not used yet; kept as a later "hero" signal |
+
+  That gives labels for **both** stages from your past shoots: ★+ against 0 trains and scores stage 1, and ★★+ against ★ trains and scores stage 2. Your history matches the pipeline, which makes this much more tractable than a single keep/reject label would.
+
+- **Two bodies, clocks not always synced.** Capture times are compared **only between frames from the same body** (Milestone 1). Within one body the clock is consistent even when it's wrong, so time gaps still work. Times are never compared across bodies.
+
 ---
 
 ## 2. Decisions and their reasons
@@ -227,12 +243,14 @@ Follow the repo's existing pattern for tests that need real files (`RAPIDRAW_TES
 ### Inputs per frame
 
 - Capture time with sub-seconds and EV. Reuse `auto_stack::read_frame` / `parse_capture_time` (`auto_stack.rs:381`, `:346`) and make them `pub(crate)`. They mmap and read EXIF only, with no decode.
-- Body id: Make + Model + BodySerialNumber. Read them in the same EXIF pass.
+- Body id: Make + Model + BodySerialNumber, read in the same EXIF pass. If the serial is missing, use Make + Model. If two frames share that but their file-name prefixes differ (e.g. `_DSC` vs `DSC_`, or custom per-body prefixes), split by prefix too. Log a warning when bodies can't be told apart, because then their clocks get mixed.
+- Frames with no capture time: order them by file name and group them on embeddings only (treat every gap as `T_burst < gap <= T_hard`).
 - Embedding `e` (L2-normalised).
 
 ### Algorithm
 
-1. Split frames **by body**. Two bodies have independent clocks and different focal lengths, so the same moment from two angles is two groups. This is wanted: they are different pictures.
+1. Split frames **by body**. Your bodies' clocks are often not synced, so a time gap between two bodies' frames means nothing. Different bodies also usually carry different focal lengths, so the same moment from two angles becomes two moments. That's wanted: they're different pictures, and each gets its own pick.
+   - **Display order across bodies (v1, not POC):** to interleave both bodies' moments in one timeline, estimate a per-body clock offset by finding the shift that best aligns the two bodies' moment embeddings (same scene, same minute). Until then, list moments per body.
 2. Sort each body's frames by capture time and walk them in order. The current group `G` has a running centroid `c` (mean of members' `e`, re-normalised). For frame `i`, with `gap` = time since the previous frame:
    - `gap > T_hard` (default **20 s**) → new group.
    - `gap <= T_burst` (default **1.0 s**, matching `BurstParams.max_gap_seconds`) → join `G` unless `cos(e_i, c) < τ_cut` (default **0.55**, a scene cut mid-burst).
@@ -311,8 +329,8 @@ Then, within each moment:
 
 The apply mapping is configurable. Defaults:
 
-- `Candidate`/`Rescued` → no change;
-- `Pick` (Milestone 4) → ★★★;
+- `Candidate`/`Rescued` → ★ (your first-pass rating);
+- `Pick` (Milestone 4) → ★★ (your final-pick rating);
 - `Reject` → nothing, or a red label if opted in;
 - `Surplus` → nothing.
 
@@ -342,7 +360,9 @@ A version that lives in the library is v1, after the POC proves out:
 
 **Milestone 2 is done when**, on your 3–5 held-out rated shoots:
 
-- **false-reject rate ≤ 2%**: of the frames you rated, at most 2% are `Reject` (rescued ones count as kept);
+- **false-reject rate ≤ 2%** against your ★+ frames: at most 2% of them end up `Reject` (rescued ones count as kept);
+- **≤ 0.5% of your ★★+ frames** end up `Reject`. Final picks must practically never be thrown out;
+- **≥ 90% of your ★★+ frames** end up `Candidate` or `Rescued`, not `Surplus`. A pick that lands in Surplus never reaches the stage-2 ranking;
 - candidates are ≤ 35% of the shoot;
 - a 1000-frame shoot analyses in **< 3 min** on your machine (Windows + DirectML), cold, excluding model download.
 
@@ -361,7 +381,9 @@ The false-reject rate is the number that matters. A culler that throws away a ke
 
 The part that is not easy is the **labels**. A frame you didn't rate is usually not a bad frame. It lost to its neighbour. A model trained on "rated vs unrated" frames as independent examples learns "near-duplicates are bad", which is nonsense. So train two heads:
 
-1. **Pairwise (main):** within each moment, for every (rated, unrated) pair, the example is `x_rated − x_unrated` with label 1 (and the reverse with label 0). Fit a logistic regression with an L2 penalty. The weight vector `w` gives a score `s(x) = w·x`, used to **rank within a moment**. This is the standard RankNet-style trick, and it is what the data actually supports.
+1. **Pairwise (main), one head per pass.** Within each moment, for every (better, worse) pair, the example is `x_better − x_worse` with label 1 (and the reverse with label 0). Fit a logistic regression with an L2 penalty. The weight vector `w` gives a score `s(x) = w·x`, used to **rank within a moment**. This is the standard RankNet-style trick, and it is what the data actually supports.
+   - **Pass-1 head:** pairs of (★+, 0) frames. It ranks the candidates in stage 1, alongside the tech score.
+   - **Pass-2 head:** pairs of (★★+, exactly ★) frames. It ranks the candidates for picks in stage 2. This head learns your actual taste, so it is the one that matters most.
 2. **Pointwise (secondary):** a logistic `p(keep | x)`, with class weights, for **singleton moments** and for a global "is this frame worth a look at all" signal.
 
 Start with logistic models. Try a 1-hidden-layer MLP (256 units) only if the logistic models plateau. Fine-tuning the encoder is out of scope.
@@ -380,7 +402,7 @@ Start with logistic models. Try a 1-hidden-layer MLP (256 units) only if the log
 - Embedded XMP (DNG) via `embedded_xmp::read` (`embedded_xmp.rs:73`).
 - `.rrdata` `rating` for shoots culled in BlitzRaw.
 - **Read the XMP directly.** Don't rely on what has been merged into `.rrdata`: `apply_xmp_rating` keeps a non-zero BlitzRaw rating over the XMP one (`:6110`).
-- `keeper = max(sources) >= R_min` (default 1).
+- `level = max(sources)`: 0 = not kept, 1 = first pass, 2 = final pick, 3+ = portfolio (stored, unused for now).
 - Ignore in-camera ratings (`camera_rating`) by default. Make it a flag.
 
 **Folder filter:** only include folders where 3–60% of frames are rated. That leaves out unculled folders, and folders where the rejects were already deleted (which invert the class balance). The extractor prints per-folder stats so you can exclude more by hand.
@@ -419,7 +441,7 @@ Install it in the app data `models/taste/`. Inference in Rust (`taste.rs`) is a 
 
 SigLIP 2 vs DINOv2 is an empirical question for _your_ taste. Extract both on ~5k frames and compare the cross-validated metrics. Keep the better one as the single embedder for grouping too, so there is one model to run.
 
-**Milestone 3 is done when**, on the held-out rated shoots, the pairwise head's **top-1-in-moment agreement** beats the tech-score-only ranking by a clear margin. Set the margin once the baseline is measured; 10 points is a reasonable bar. If it doesn't, stop and look at the labels before adding model capacity.
+**Milestone 3 is done when**, on the held-out rated shoots, the **pass-2 head's top-1-in-moment agreement with your ★★ frames** beats the tech-score-only ranking by a clear margin. Set the margin once the baseline is measured; 10 points is a reasonable bar. If it doesn't, stop and look at the labels before adding model capacity.
 
 ---
 
@@ -518,7 +540,7 @@ Per moment:
 
 Whether the VLM, the taste model or a blend agrees best with you is measured on the held-out shoots, not assumed. Report all three in `cull_eval eval`.
 
-**Milestone 4 is done when** VLM picks agree with your held-out ratings better than taste-only picks, and a 1000-frame shoot finishes in < 30 min.
+**Milestone 4 is done when** VLM picks agree with your held-out ★★ frames better than taste-only picks, and a 1000-frame shoot finishes in < 30 min.
 
 ---
 
@@ -579,9 +601,9 @@ These are estimates to measure, not promises. Milestone 0's CLI prints the real 
 ## 12. Risks and open questions
 
 1. **Embedded preview sizes** (DNGs from Adobe's converter in particular). Resolved by the M0 probe.
-2. **Two bodies and clock offset.** Grouping is per body, so an offset doesn't break grouping. It would matter only if moments from two bodies were ever merged, which this spec does not do.
+2. **Two bodies and clock offset.** Resolved by grouping per body (Milestone 1). What's left is display order across bodies, a v1 nicety. The real risk is two bodies of the same model with no serial in EXIF; the file-name-prefix split covers the common case.
 3. **Looking down vs eyes closed.** A known false-positive source. Watch it in the eye set; the pose and blendshape signals help.
-4. **Your rating semantics.** Do 1★ and 3★ mean different things in your workflow (e.g. 1★ = deliverable, 3★ = portfolio)? If so, train on ≥ 1★ for the cull and treat higher stars as a separate, later "hero" signal.
+4. **Rating semantics.** Resolved: ★ = first pass, ★★ = final pick, ★★★+ = portfolio (section 1). Check in the per-folder stats that older shoots used the same scheme. A shoot where ★ meant "final" would poison the pass-2 labels, so exclude it.
 5. **Taste drift across genres.** Corporate events vs weddings vs portraits. Start with one model. If cross-validation shows per-genre models do better, add a "shoot type" selector.
 6. **Existing culler.** Once the POC works, remove `culling.rs` / `CullingModal.tsx`. It decodes every RAW in full (`culling.rs:138`), its "reject" toggles labels, and its `rate_zero` action is labelled "1 star".
 
